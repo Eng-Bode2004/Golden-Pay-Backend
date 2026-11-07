@@ -118,6 +118,27 @@ function serviceInfo(): Response {
   });
 }
 
+/** Database state for the lightweight /health check; it never queries the database. */
+let databaseState: "connecting" | "connected" | "unavailable" = "connecting";
+
+/** GET /health: answers 200 as soon as the server listens, whatever the database does. */
+function liveness(): Response {
+  return jsonResponse(
+    {
+      success: true,
+      data: {
+        status: "ok",
+        service: env.serviceName,
+        uptime_seconds: Math.floor((Date.now() - startedAt) / 1000),
+        database: databaseState,
+        timestamp: new Date().toISOString(),
+      },
+    },
+    200,
+  );
+}
+
+/** GET /api/v1/health: ready to serve, which needs the database. */
 async function healthInfo(): Promise<Response> {
   const healthy = await isDatabaseReady();
   return jsonResponse(
@@ -156,6 +177,8 @@ async function handleRequest(req: Request): Promise<Response> {
   try {
     if (req.method === "OPTIONS") {
       response = new Response(null, { status: 204 });
+    } else if (url.pathname === "/health" && req.method === "GET") {
+      response = liveness();
     } else if (pathname === "/health" && req.method === "GET") {
       response = await healthInfo();
     } else if (pathname === "/" && req.method === "GET") {
@@ -206,12 +229,49 @@ async function handleRequest(req: Request): Promise<Response> {
   return response;
 }
 
-async function bootstrap(): Promise<void> {
-  await connectDatabase();
-  await seedRbac();
-  await ensureUploadDirectory();
+/** Where the database is, without credentials, for logs. */
+function databaseTarget(): string {
+  try {
+    const url = new URL(env.databaseUrl);
+    return `${url.hostname}:${url.port || "5432"}${url.pathname}`;
+  } catch {
+    return "(DATABASE_URL is not a valid URL)";
+  }
+}
 
+/**
+ * Connects to PostgreSQL, applies the schema and seeds roles, retrying until it works.
+ * The HTTP server is already up, so health checks answer and requests that need the
+ * database get a clear 503 instead of a refused connection.
+ */
+async function connectWithRetry(): Promise<void> {
+  const target = databaseTarget();
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await connectDatabase();
+      await seedRbac();
+      await ensureUploadDirectory();
+      databaseState = "connected";
+      logger.info("postgresql.ready", { target, attempt });
+      return;
+    } catch (error) {
+      databaseState = "unavailable";
+      const wait = Math.min(60, 5 * attempt);
+      logger.error("postgresql.unreachable", {
+        target,
+        attempt,
+        error: error instanceof Error ? error.message : String(error),
+        retry_in_seconds: wait,
+        hint: "Check DATABASE_URL and that this database accepts connections from this server",
+      });
+      await Bun.sleep(wait * 1000);
+    }
+  }
+}
+
+async function bootstrap(): Promise<void> {
   const server = Bun.serve({
+    hostname: process.env.LISTEN_HOST ?? "0.0.0.0",
     port: env.port,
     development: !env.isProduction,
     maxRequestBodySize:
@@ -220,10 +280,13 @@ async function bootstrap(): Promise<void> {
   });
 
   logger.info("service.started", {
+    host: server.hostname,
     port: server.port,
     environment: env.nodeEnv,
     base_path: "/api/v1",
+    database: databaseTarget(),
   });
+  void connectWithRetry();
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {

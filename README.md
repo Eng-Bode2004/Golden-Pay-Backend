@@ -301,13 +301,21 @@ All services read `IdentityAcess_Services/.env` (never commit it).
 
 ## Deploying (Thalmet Cloud or any container host)
 
-The whole backend runs as **one service**: `bun start.ts` applies the schema, starts the
-domain services on internal ports 4002–4005, and starts the Identity API on `$PORT`
-(default 4001), the only public entry. It proxies `/api/v1/forms`, `/investigators`,
+The whole backend runs as **one service**: `bun start.ts` starts the Identity API on
+`$PORT` (default 4001), the only public entry, which applies the schema once PostgreSQL
+answers; the domain services then start on internal ports 4002–4005. It proxies `/api/v1/forms`, `/investigators`,
 `/investigations` and `/headoffice` to the others.
 
 - Build: the `Dockerfile` (Bun 1.3.14, LibreOffice and Chromium for PDF reports, Arabic fonts).
-- Port: `4001` (or whatever `PORT` the platform sets). Health check: `GET /api/v1/health`.
+- Port: `4001` (or whatever `PORT` the platform sets), on `0.0.0.0`. The internal
+  services listen on `127.0.0.1` only.
+- Health check: `GET /health` answers 200 as soon as the server listens and reports the
+  database state without querying it. `GET /api/v1/health` is the readiness check: 503
+  until PostgreSQL is connected.
+- Startup: missing required settings stop the launcher with a list of their names. An
+  unreachable database does not stop it: the API retries in the background, logging
+  `postgresql.unreachable` with the host, and requests that need data get a 503
+  `DATABASE_UNAVAILABLE` until it connects.
 - Environment variables: everything in `IdentityAcess_Services/.env.example`, with
   `NODE_ENV=production`. Use the **same** `NATIONAL_ID_ENCRYPTION_KEY`,
   `NATIONAL_ID_HMAC_SECRET`, `JWT_SECRET` and `REFRESH_TOKEN_PEPPER` as the existing

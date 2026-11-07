@@ -49,5 +49,5 @@ RUN apt-get update \
 USER bun
 EXPOSE 4001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD bun -e "const r = await fetch('http://127.0.0.1:' + (process.env.PORT || 4001) + '/api/v1/health'); process.exit(r.ok ? 0 : 1)"
+  CMD bun -e "const r = await fetch('http://127.0.0.1:' + (process.env.PORT || 4001) + '/health'); process.exit(r.ok ? 0 : 1)"
 CMD ["bun", "start.ts"]

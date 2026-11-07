@@ -92,7 +92,8 @@ export async function startService(options: ServiceOptions): Promise<void> {
     await connectDatabase();
     await applySchema(schema);
     await seed?.();
-    const server = Bun.serve({ port, maxRequestBodySize: 32 * 1024 * 1024, fetch: handle });
+    // Internal services are reached only through the Identity API on the same machine.
+    const server = Bun.serve({ hostname: process.env.INTERNAL_HOST ?? "127.0.0.1", port, maxRequestBodySize: 32 * 1024 * 1024, fetch: handle });
     logger.info("service.started", { service: name, port: server.port });
 
     const stop = async () => {
