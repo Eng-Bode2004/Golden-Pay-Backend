@@ -312,5 +312,6 @@ domain services on internal ports 4002–4005, and starts the Identity API on `$
   `NODE_ENV=production`. Use the **same** `NATIONAL_ID_ENCRYPTION_KEY`,
   `NATIONAL_ID_HMAC_SECRET`, `JWT_SECRET` and `REFRESH_TOKEN_PEPPER` as the existing
   installation, or stored national IDs can no longer be read and every user is signed out.
-  Set `STORAGE_*` so files go to the bucket, and `CORS_ORIGINS` to the dashboards' addresses.
+  Set `STORAGE_*` (or the same names with `S3_`) so files go to the bucket, and
+  `CORS_ORIGINS` to the dashboards' addresses.
 - Never commit `.env`; the platform's environment settings hold the secrets.

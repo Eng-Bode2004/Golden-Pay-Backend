@@ -167,19 +167,28 @@ export function loadEnv(): AppEnv {
   };
 }
 
+/** STORAGE_* names, or the S3_* names a host such as Thalmet Cloud provides. */
+function storageSetting(name: string): string | undefined {
+  for (const key of [`STORAGE_${name}`, `S3_${name}`]) {
+    const value = process.env[key]?.trim();
+    if (value) return value;
+  }
+  return undefined;
+}
+
 function readStorage(): AppEnv["storage"] {
-  const bucket = process.env.STORAGE_BUCKET?.trim();
+  const bucket = storageSetting("BUCKET");
   if (!bucket) return null;
-  const accessKeyId = process.env.STORAGE_ACCESS_KEY_ID?.trim() ?? "";
-  const secretAccessKey = process.env.STORAGE_SECRET_ACCESS_KEY?.trim() ?? "";
+  const accessKeyId = storageSetting("ACCESS_KEY_ID") ?? "";
+  const secretAccessKey = storageSetting("SECRET_ACCESS_KEY") ?? "";
   if (!accessKeyId || !secretAccessKey) {
-    throw new Error("STORAGE_BUCKET is set but STORAGE_ACCESS_KEY_ID or STORAGE_SECRET_ACCESS_KEY is missing");
+    throw new Error("A storage bucket is set but its access key id or secret access key is missing (STORAGE_* or S3_*)");
   }
   return {
     bucket,
-    region: process.env.STORAGE_REGION?.trim() || "us-east-1",
-    endpoint: process.env.STORAGE_ENDPOINT?.trim() || undefined,
-    folder: (process.env.STORAGE_FOLDER ?? "").trim().replace(/^\/+|\/+$/g, ""),
+    region: storageSetting("REGION") || "us-east-1",
+    endpoint: storageSetting("ENDPOINT") || undefined,
+    folder: (storageSetting("FOLDER") ?? "").replace(/^\/+|\/+$/g, ""),
     accessKeyId,
     secretAccessKey,
   };
