@@ -1,0 +1,10 @@
+{
+  "name": "golden-pay-backend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "install:all": "cd Shared && bun install --frozen-lockfile --production && cd ../IdentityAcess_Services && bun install --frozen-lockfile --production",
+    "build": "bun run install:all",
+    "start": "bun start.ts"
+  }
+}

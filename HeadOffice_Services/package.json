@@ -1,0 +1,9 @@
+{
+  "name": "golden-pay-head-office",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "DB_POOL_MAX=3 bun --env-file=../IdentityAcess_Services/.env app.ts",
+    "dev": "DB_POOL_MAX=3 bun --env-file=../IdentityAcess_Services/.env --watch app.ts"
+  }
+}

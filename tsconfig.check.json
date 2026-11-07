@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleDetection": "force",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "noUncheckedIndexedAccess": true,
+    "types": ["bun"],
+    "typeRoots": ["./IdentityAcess_Services/node_modules/@types", "./IdentityAcess_Services/node_modules"]
+  },
+  "include": ["start.ts", "Shared/**/*.ts", "DynamicForms_Services/*.ts", "Investigations_Services/*.ts"],
+  "exclude": ["**/node_modules/**"]
+}

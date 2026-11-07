@@ -1,0 +1,30 @@
+# Dependencies and build output
+node_modules/
+dist/
+out/
+*.tsbuildinfo
+
+# Secrets: settings live in IdentityAcess_Services/.env locally, and in the
+# cloud service's environment variables when deployed. Never commit them.
+.env
+.env.*
+!.env.example
+*.local
+
+# Editors and scratch files
+.idea/
+.vscode/
+.DS_Store
+*.tmp.ts
+*.log
+
+# Client documents and renders of them stay out of this public repository:
+# the templates live in the database and the cloud bucket.
+DynamicForms_Services/Seeds/converted-doc/
+DynamicForms_Services/Seeds/template-configuration-report.json
+Shared/templates/tests/visual/baselines/
+Shared/templates/tests/visual/output/
+
+# Local file storage
+storage/
+Storage/

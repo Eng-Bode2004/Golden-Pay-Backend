@@ -1,0 +1,11 @@
+{
+  "name": "golden-pay-dynamic-forms",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "DB_POOL_MAX=3 bun --env-file=../IdentityAcess_Services/.env app.ts",
+    "dev": "DB_POOL_MAX=3 bun --env-file=../IdentityAcess_Services/.env --watch app.ts",
+    "test:templates": "bun --env-file=../IdentityAcess_Services/.env scripts/test-templates.ts",
+    "rescan-drafts": "bun --env-file=../IdentityAcess_Services/.env scripts/rescan-drafts.ts"
+  }
+}
