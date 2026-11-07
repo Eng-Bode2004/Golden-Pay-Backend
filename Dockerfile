@@ -8,7 +8,7 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends \
      libreoffice-writer-nogui chromium \
      fonts-noto-core fonts-noto-ui-core fonts-dejavu-core fonts-liberation2 \
-     fonts-crosextra-carlito fonts-crosextra-caladea fonts-kacst fonts-hosny-amiri \
+     fonts-crosextra-carlito fonts-crosextra-caladea fonts-kacst-one fonts-arabeyes fonts-hosny-amiri \
   && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \
