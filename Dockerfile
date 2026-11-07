@@ -24,6 +24,11 @@ RUN cd Shared && bun install --frozen-lockfile --production \
   && cd ../IdentityAcess_Services && bun install --frozen-lockfile --production
 
 COPY . .
+# Thalmet Cloud runs containers unprivileged on a read-only filesystem: run as the image's
+# non-root user, and write only to /tmp (report conversion, Chromium and LibreOffice
+# profiles). Uploaded and generated files go to the cloud bucket (STORAGE_*).
+RUN chown -R bun:bun /app
+USER bun
 EXPOSE 4001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD bun -e "const r = await fetch('http://127.0.0.1:' + (process.env.PORT || 4001) + '/api/v1/health'); process.exit(r.ok ? 0 : 1)"
