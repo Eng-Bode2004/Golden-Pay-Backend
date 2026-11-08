@@ -17,13 +17,15 @@ import { availableEngine, ConverterUnavailable, docToDocx, docxToPdf, pdfToDocx 
 import {
   allFields,
   BLOCKS,
+  defaultEvidence,
   DefinitionError,
+  evidenceKindFor,
   parseDefinition,
   type FieldDef,
   type TemplateDefinition,
 } from "../Shared/templates/definition.ts";
 import { DocxPackage, sha256 } from "../Shared/templates/docx.ts";
-import { insertPlace, PlaceError, type PlaceTarget, placeHasContent, removePlace, renamePlace } from "../Shared/templates/edit.ts";
+import { insertPlace, PlaceError, type PlaceTarget, placeHasContent, removePlace, renamePlace, wrapPlace } from "../Shared/templates/edit.ts";
 import { inventoryDocx, INVESTIGATION_TYPES, type ClientProfile, type InventoryRecord } from "../Shared/templates/inventory.ts";
 import { layoutHtml } from "../Shared/templates/preview.ts";
 import { renderDocxReport, SAMPLE_CONTEXT, sampleAnswers, samplePhotoBytes } from "../Shared/templates/report.ts";
@@ -820,6 +822,7 @@ export function registerTemplateRoutes(router: Router): void {
       if (!["move", "create", "remove"].includes(op)) throw ApiError.badRequest("op must be move, create or remove");
       let slots = [...((version.slots as Slot[]) ?? [])];
       let bindings = [...((version.bindings as Binding[]) ?? [])];
+      let definition = version.definition as TemplateDefinition;
       const pkg = DocxPackage.open(await loadFile(version.layout_path as string));
       const target = (): PlaceTarget => {
         const paragraph = Number(body.paragraph);
@@ -883,9 +886,41 @@ export function registerTemplateRoutes(router: Router): void {
           const where = target();
           const kind = String(body.kind ?? "text");
           if (!["text", "statement", "checkbox"].includes(kind)) throw ApiError.badRequest("kind must be text, statement or checkbox");
-          const placed = insertPlace(pkg, anchor, where);
+          const end = body.end === undefined || body.end === null ? null : Number(body.end);
+          if (end !== null && (kind !== "statement" || !Number.isInteger(end) || end <= where.offset)) {
+            throw ApiError.badRequest("Only a statement can wrap selected text, and the selection must not be empty");
+          }
+          if (end !== null) {
+            // The selected client sentence becomes the statement: it prints as written only when
+            // the investigator confirms it with the evidence its wording calls for.
+            const sentence = wrapPlace(pkg, anchor, where, end).replace(/\s+/g, " ").trim();
+            if (!sentence) throw new PlaceError("Select the sentence's text first");
+            const label = sentence.length > 60 ? `${sentence.slice(0, 57).trim()}…` : sentence;
+            const taken = new Set(allFields(definition).map((field) => field.key));
+            let n = 1;
+            while (taken.has(`statement_${n}`)) n += 1;
+            const field: FieldDef = {
+              key: `statement_${n}`,
+              label,
+              type: "attestation",
+              statement: sentence,
+              evidence: defaultEvidence(evidenceKindFor(sentence)),
+            };
+            const sections = definition.sections.some((section) => section.id === "manual_points")
+              ? definition.sections
+              : [...definition.sections, { id: "manual_points", title: "نقاط مضافة يدويًا", fields: [] }];
+            definition = parseDefinition({
+              ...definition,
+              sections: sections.map((section) => (section.id === "manual_points" ? { ...section, fields: [...section.fields, field] } : section)),
+            });
+            slots.push({ anchor, kind: "statement", part: where.part, label, text: sentence, section: "نقاط مضافة يدويًا" });
+            bindings.push({ anchor, action: "statement", source: `answers.${field.key}` });
+          }
+          const placed = end === null ? insertPlace(pkg, anchor, where) : { inCell: false, label: "" };
           const source = optionalText(body.source, 120);
-          if (kind === "statement") {
+          if (end !== null) {
+            // Added above, with its own field.
+          } else if (kind === "statement") {
             slots.push({ anchor, kind: "statement", part: where.part, label: placed.label === "نقطة جديدة" ? "عبارة إقرار" : placed.label, text: "", section: "نقاط مضافة يدويًا" });
             if (source) bindings.push({ anchor, action: "statement", source });
           } else if (kind === "checkbox") {
@@ -899,15 +934,16 @@ export function registerTemplateRoutes(router: Router): void {
         }
       } catch (error) {
         if (error instanceof PlaceError) throw new ApiError(400, "PLACE_NOT_ALLOWED", error.message);
+        if (error instanceof DefinitionError) throw new ApiError(400, "INVALID_DEFINITION", error.message, { details: error.issues });
         throw error;
       }
-      bindings = parseBindings(bindings, version.definition as TemplateDefinition, slots);
+      bindings = parseBindings(bindings, definition, slots);
       const bytes = pkg.save();
       const layoutPath = await storeFile(`templates/layouts/${version.version_id}-${Date.now()}.docx`, bytes);
       const rows = await query(
         `UPDATE template_versions SET layout_path = $2, layout_sha256 = $3, slots = $4::text::jsonb, bindings = $5::text::jsonb,
-           updated_at = now() WHERE version_id = $1 AND status = 'draft' RETURNING version_id`,
-        [version.version_id, layoutPath, await sha256(bytes), JSON.stringify(slots), JSON.stringify(bindings)],
+           definition = $6::text::jsonb, updated_at = now() WHERE version_id = $1 AND status = 'draft' RETURNING version_id`,
+        [version.version_id, layoutPath, await sha256(bytes), JSON.stringify(slots), JSON.stringify(bindings), JSON.stringify(definition)],
       );
       if (!rows[0]) throw new ApiError(409, "TEMPLATE_VERSION_LOCKED", "This version is no longer a draft");
       await logTemplateEvent({
@@ -915,7 +951,7 @@ export function registerTemplateRoutes(router: Router): void {
         template_id: version.template_id as string,
         version_id: version.version_id as string,
         actor_id: auth.user.user_id,
-        note: op === "create" ? "أُضيفت نقطة" : op === "move" ? "نُقلت نقطة" : "حُذفت نقطة",
+        note: op === "create" ? (body.end !== undefined && body.end !== null ? "حُوّلت جملة إلى عبارة إقرار" : "أُضيفت نقطة") : op === "move" ? "نُقلت نقطة" : "حُذفت نقطة",
         metadata: { op, anchor },
       });
       return ok({ anchor, html: layoutHtml(bytes), slots, bindings });

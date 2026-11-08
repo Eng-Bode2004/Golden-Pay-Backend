@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { allFields, type Answers, type TemplateDefinition } from "../definition.ts";
 import { descendants, DocxPackage, type El, NS, textOf } from "../docx.ts";
-import { insertPlace, paragraphsOf, placeHasContent, renamePlace } from "../edit.ts";
+import { insertPlace, PlaceError, paragraphsOf, placeHasContent, renamePlace, wrapPlace } from "../edit.ts";
 import { renderTemplate } from "../render.ts";
 import { type Binding, scanTemplate } from "../scan.ts";
 
@@ -102,5 +102,57 @@ describe("moving statement and checkbox points", () => {
       (el) => el.getAttributeNS(NS.w14, "val") === "1",
     ).length;
     expect(ticked).toBe(originalTicked - 1);
+  });
+});
+
+describe("turning selected client text into a statement", () => {
+  // A paragraph with plain client text and no places in it.
+  const pkg0 = DocxPackage.open(scan.docx);
+  const paragraphs0 = paragraphsOf(pkg0, PART);
+  const index = paragraphs0.findIndex(
+    (p) => textOf(p).trim().length > 25 && !descendants(p, "bookmarkStart").length && !descendants(p, "sdt").length && !descendants(p, "hyperlink").length,
+  );
+  const full = textOf(paragraphs0[index]!);
+  const from = full.search(/\S/) + 2;
+  const to = from + 15;
+
+  const wrapped = () => {
+    const pkg = DocxPackage.open(scan.docx);
+    const text = wrapPlace(pkg, "gp_u090", { part: PART, paragraph: index, offset: from }, to);
+    return { pkg, text };
+  };
+
+  test("wraps exactly the selected characters and keeps the paragraph's text", () => {
+    const { pkg, text } = wrapped();
+    // Spaces at the edges of the selection are left out.
+    expect(text).toBe(full.slice(from, to).trim());
+    expect(textOf(paragraphsOf(pkg, PART)[index]!)).toBe(full);
+    expect(placeHasContent(pkg, "gp_u090")).toBe(true);
+  });
+
+  test("the sentence prints when confirmed with evidence and disappears otherwise", () => {
+    const { pkg, text } = wrapped();
+    const definition: TemplateDefinition = {
+      ...scan.definition,
+      sections: [...scan.definition.sections, { id: "manual_points", title: "نقاط مضافة يدويًا", fields: [{ key: "statement_1", label: text, type: "attestation", statement: text, evidence: { kind: "visit", requires: [{ type: "photos", min: 1 }] } }] }],
+    };
+    const bindings = [...scan.bindings, { anchor: "gp_u090", action: "statement" as const, source: "answers.statement_1" }];
+    const slots = [...scan.slots, { anchor: "gp_u090", kind: "statement" as const }];
+    const render = (confirmed: boolean, evidence = withEvidence) =>
+      textOf(
+        DocxPackage.open(
+          renderTemplate(pkg.save(), bindings, { definition, answers: { ...answers(true), statement_1: confirmed }, caseValues: {}, images: {}, evidence, slots }).docx,
+        ).xml(PART).documentElement as El,
+      );
+    expect(render(true)).toContain(text);
+    expect(render(false)).not.toContain(text);
+    expect(render(true, { photos: {}, locations: [] })).not.toContain(text);
+  });
+
+  test("an empty selection or one over another point is refused", () => {
+    const pkg = DocxPackage.open(scan.docx);
+    expect(() => wrapPlace(pkg, "gp_u091", { part: PART, paragraph: index, offset: from }, from)).toThrow(PlaceError);
+    insertPlace(pkg, "gp_u092", { part: PART, paragraph: index, offset: from + 5 });
+    expect(() => wrapPlace(pkg, "gp_u093", { part: PART, paragraph: index, offset: from }, to)).toThrow(PlaceError);
   });
 });

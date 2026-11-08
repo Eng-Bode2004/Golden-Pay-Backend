@@ -169,6 +169,79 @@ export function insertPlace(pkg: DocxPackage, name: string, target: PlaceTarget)
   return { inCell, label: label.slice(-60) || "نقطة جديدة" };
 }
 
+/**
+ * Wraps characters `target.offset` to `end` of one paragraph in a place, so the client's own
+ * sentence becomes the point (a statement that prints only when it is proven). Runs are split
+ * at both edges; the text and its formatting stay exactly as they are.
+ * Returns the wrapped text.
+ */
+export function wrapPlace(pkg: DocxPackage, name: string, target: PlaceTarget, end: number): string {
+  if (!pkg.textParts().includes(target.part)) throw new PlaceError("Unknown part of the document");
+  const paragraph = paragraphsOf(pkg, target.part)[target.paragraph];
+  if (!paragraph) throw new PlaceError("That paragraph does not exist");
+  const whole = textOf(paragraph);
+  const total = whole.length;
+  let from = Math.max(0, Math.min(target.offset, total));
+  let to = Math.min(end, total);
+  // A double-click often takes the space after a word too.
+  while (from < to && /\s/.test(whole[from]!)) from += 1;
+  while (to > from && /\s/.test(whole[to - 1]!)) to -= 1;
+  if (to <= from) throw new PlaceError("Select the sentence's text first");
+
+  // The selection may not overlap another place: it would be printed or removed with it.
+  const open = new Set<string>();
+  let offset = 0;
+  for (const node of children(paragraph)) {
+    const kind = local(node);
+    if (kind === "bookmarkStart" && (attr(node, "name") ?? "").startsWith("gp_")) {
+      const next = node.nextSibling as El | null;
+      const point = next && next.nodeType === 1 && local(next) === "bookmarkEnd" && attr(next, "id") === attr(node, "id");
+      if (offset > from && offset < to) throw new PlaceError("The selected text contains another point; select only the sentence");
+      if (!point) open.add(attr(node, "id") ?? "");
+    }
+    if (kind === "bookmarkEnd" && open.delete(attr(node, "id") ?? "") && offset > from && offset < to) {
+      throw new PlaceError("The selected text overlaps another place; select only the sentence");
+    }
+    const length = lengthOf(node);
+    if (length && open.size && offset < to && offset + length > from) {
+      throw new PlaceError("The selected text is already part of another place");
+    }
+    if (descendants(node, "bookmarkStart").some((mark) => (attr(mark, "name") ?? "").startsWith("gp_")) && offset < to && offset + length > from) {
+      throw new PlaceError("The selected text contains another point; select only the sentence");
+    }
+    offset += length;
+  }
+
+  /** The node a boundary at `at` goes before (splitting a run there), or null for the paragraph's end. */
+  const boundary = (at: number): El | null => {
+    let position = 0;
+    for (const node of children(paragraph)) {
+      const length = lengthOf(node);
+      if (!length) continue;
+      if (at === position) return node;
+      if (at < position + length) {
+        if (local(node) !== "r") throw new PlaceError("The selection starts or ends inside a link or a form field; select whole words around it");
+        const second = splitRun(node, at - position);
+        if (!second) throw new PlaceError("This text cannot be split here; select whole words");
+        return second;
+      }
+      position += length;
+    }
+    return null;
+  };
+  const doc = paragraph.ownerDocument!;
+  const id = String(nextBookmarkId(pkg));
+  // The end first: splitting at the start never moves a node after it.
+  const endNode = boundary(to);
+  const startNode = boundary(from)!;
+  const startMark = wEl(doc, "bookmarkStart", { id, name });
+  const endMark = wEl(doc, "bookmarkEnd", { id });
+  startNode.parentNode!.insertBefore(startMark, startNode);
+  if (endNode) endNode.parentNode!.insertBefore(endMark, endNode);
+  else paragraph.appendChild(endMark);
+  return textOf(paragraph).slice(from, to);
+}
+
 /** Whether a place wraps client content (a sentence, a box) rather than being an empty point. */
 export function placeHasContent(pkg: DocxPackage, name: string): boolean {
   for (const part of pkg.textParts()) {
