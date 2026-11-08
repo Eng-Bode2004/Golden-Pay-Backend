@@ -24,8 +24,20 @@ import {
   type FieldDef,
   type TemplateDefinition,
 } from "../Shared/templates/definition.ts";
-import { DocxPackage, sha256 } from "../Shared/templates/docx.ts";
-import { insertPlace, PlaceError, type PlaceTarget, placeHasContent, removePlace, renamePlace, wrapPlace } from "../Shared/templates/edit.ts";
+import { attr, descendants, DocxPackage, type El, sha256 } from "../Shared/templates/docx.ts";
+import {
+  boxOffset,
+  excerptLayout,
+  insertPlace,
+  isFloatingBox,
+  nudgeBox,
+  PlaceError,
+  type PlaceTarget,
+  placeHasContent,
+  removePlace,
+  renamePlace,
+  wrapPlace,
+} from "../Shared/templates/edit.ts";
 import { inventoryDocx, INVESTIGATION_TYPES, type ClientProfile, type InventoryRecord } from "../Shared/templates/inventory.ts";
 import { layoutHtml } from "../Shared/templates/preview.ts";
 import { renderDocxReport, SAMPLE_CONTEXT, sampleAnswers, samplePhotoBytes } from "../Shared/templates/report.ts";
@@ -46,6 +58,22 @@ function nextAnchor(slots: Slot[], prefix: string): string {
   let n = 1;
   while (taken.has(`${prefix}${String(n).padStart(3, "0")}`)) n += 1;
   return `${prefix}${String(n).padStart(3, "0")}`;
+}
+
+/** The boxes of the checkbox question a box belongs to (boxes bound to the same answer). */
+function boxGroup(version: Row, anchor: string | null | undefined): Slot[] {
+  const slots = (version.slots as Slot[] | null) ?? [];
+  const bindings = (version.bindings as Binding[] | null) ?? [];
+  const slot = slots.find((item) => item.anchor === anchor);
+  if (!slot || slot.kind !== "checkbox") throw ApiError.badRequest("Choose a checkbox on the page first");
+  const source = bindings.find((item) => item.anchor === slot.anchor && item.action === "check")?.source;
+  const boxes = slots.filter((item) => item.kind === "checkbox");
+  if (source) {
+    const bound = new Set(bindings.filter((item) => item.action === "check" && item.source === source).map((item) => item.anchor));
+    return boxes.filter((item) => bound.has(item.anchor));
+  }
+  if (slot.group) return boxes.filter((item) => item.group === slot.group);
+  return [slot];
 }
 
 // ───────────── storage ─────────────
@@ -955,6 +983,127 @@ export function registerTemplateRoutes(router: Router): void {
         metadata: { op, anchor },
       });
       return ok({ anchor, html: layoutHtml(bytes), slots, bindings });
+    }),
+  );
+
+  /** The boxes of one checkbox question: which are drawn at a fixed spot, and how far each was moved. */
+  router.get(
+    "/forms/admin/versions/:version_id/boxes",
+    withPermission(MANAGE, async (context) => {
+      const version = await findVersion(context.params.version_id);
+      if (version.layout_mode !== "docx" || !version.layout_path) throw ApiError.badRequest("This version has no client layout");
+      const group = boxGroup(version, context.url.searchParams.get("anchor"));
+      const pkg = DocxPackage.open(await loadFile(version.layout_path as string));
+      return ok({
+        boxes: group.map((slot) => {
+          const floating = isFloatingBox(pkg, slot.anchor);
+          return { anchor: slot.anchor, option: slot.option ?? "", floating, x: floating ? boxOffset(pkg, slot.anchor) : null, nudge: slot.nudge ?? 0 };
+        }),
+      });
+    }),
+  );
+
+  /**
+   * Moves drawn checkboxes sideways so each sits next to its option once the report is
+   * printed. Drafts only; only the boxes move, never the client's text.
+   */
+  router.post(
+    "/forms/admin/versions/:version_id/boxes",
+    withPermission(MANAGE, async (context, auth) => {
+      const version = await findVersion(context.params.version_id);
+      assertDraft(version);
+      if (version.layout_mode !== "docx" || !version.layout_path) throw ApiError.badRequest("This version has no client layout");
+      const body = await readJson(context.req);
+      const moves = Array.isArray(body.moves) ? (body.moves as Record<string, unknown>[]) : [];
+      if (!moves.length || moves.length > 60) throw ApiError.badRequest("Send between 1 and 60 box moves");
+      const slots = [...((version.slots as Slot[]) ?? [])];
+      const pkg = DocxPackage.open(await loadFile(version.layout_path as string));
+      try {
+        for (const move of moves) {
+          const anchor = requiredText(move.anchor, "anchor", 40);
+          const dx = Math.round(Number(move.dx) * 10) / 10;
+          if (!Number.isFinite(dx) || Math.abs(dx) > 60) throw ApiError.badRequest("Move a box by at most 60 mm at a time");
+          if (!dx) continue;
+          const index = slots.findIndex((slot) => slot.anchor === anchor && slot.kind === "checkbox");
+          if (index < 0) throw ApiError.notFound("Box not found");
+          nudgeBox(pkg, anchor, dx);
+          const total = Math.round(((slots[index]!.nudge ?? 0) + dx) * 10) / 10;
+          slots[index] = { ...slots[index]!, nudge: total || undefined };
+        }
+      } catch (error) {
+        if (error instanceof PlaceError) throw new ApiError(400, "PLACE_NOT_ALLOWED", error.message);
+        throw error;
+      }
+      const bytes = pkg.save();
+      const layoutPath = await storeFile(`templates/layouts/${version.version_id}-${Date.now()}.docx`, bytes);
+      const rows = await query(
+        `UPDATE template_versions SET layout_path = $2, layout_sha256 = $3, slots = $4::text::jsonb, updated_at = now()
+           WHERE version_id = $1 AND status = 'draft' RETURNING version_id`,
+        [version.version_id, layoutPath, await sha256(bytes), JSON.stringify(slots)],
+      );
+      if (!rows[0]) throw new ApiError(409, "TEMPLATE_VERSION_LOCKED", "This version is no longer a draft");
+      await logTemplateEvent({
+        type: "version.edited",
+        template_id: version.template_id as string,
+        version_id: version.version_id as string,
+        actor_id: auth.user.user_id,
+        note: "عُدّلت مسافات مربعات الاختيار",
+        metadata: { moves },
+      });
+      return ok({ slots, html: layoutHtml(bytes) });
+    }),
+  );
+
+  /**
+   * How one checkbox question prints: a PDF of only the rows around its boxes, converted the
+   * same way as real reports, with every box of the question ticked.
+   */
+  router.get(
+    "/forms/admin/versions/:version_id/boxes/preview",
+    withPermission(MANAGE, async (context) => {
+      const version = await findVersion(context.params.version_id);
+      if (version.layout_mode !== "docx" || !version.layout_path) throw ApiError.badRequest("This version has no client layout");
+      const group = boxGroup(version, context.url.searchParams.get("anchor"));
+      let layout: Uint8Array;
+      try {
+        layout = excerptLayout(await loadFile(version.layout_path as string), group.map((slot) => slot.anchor));
+      } catch (error) {
+        if (error instanceof PlaceError) throw new ApiError(400, "PLACE_NOT_ALLOWED", error.message);
+        throw error;
+      }
+      // Only what is left in the excerpt is filled, so no appendix pages are added.
+      const present = new Set(
+        descendants(DocxPackage.open(layout).xml("word/document.xml").documentElement as El, "bookmarkStart").map((mark) => attr(mark, "name") ?? ""),
+      );
+      const bindings = ((version.bindings as Binding[]) ?? []).filter((binding) => present.has(binding.anchor));
+      const used = new Set(bindings.map((binding) => binding.source?.replace(/^answers\./, "")));
+      const full = version.definition as TemplateDefinition;
+      const definition: TemplateDefinition = {
+        ...full,
+        sections: full.sections.map((section) => ({ ...section, fields: section.fields.filter((field) => used.has(field.key)) })),
+      };
+      const answers = sampleAnswers(definition);
+      const source = bindings.find((binding) => binding.anchor === group[0]!.anchor && binding.action === "check")?.source?.replace(/^answers\./, "");
+      if (source) answers[source] = group.map((slot) => slot.option ?? "");
+      try {
+        const report = await renderDocxReport({
+          layout,
+          bindings,
+          slots: (version.slots as Slot[] | null) ?? null,
+          definition,
+          answers,
+          context: SAMPLE_CONTEXT,
+          images: {},
+          evidence: { photos: {}, locations: [] },
+          approved: false,
+        });
+        return new Response(report.pdf as unknown as BodyInit, {
+          headers: { "Content-Type": "application/pdf", "Content-Disposition": 'inline; filename="boxes.pdf"', "Cache-Control": "no-store" },
+        });
+      } catch (error) {
+        if (error instanceof ConverterUnavailable) throw new ApiError(503, "CONVERTER_UNAVAILABLE", error.message);
+        throw error;
+      }
     }),
   );
 

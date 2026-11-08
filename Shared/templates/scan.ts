@@ -50,6 +50,8 @@ export interface Slot {
   image?: { md5: string; role: ImageRole; cx: number; cy: number };
   rows?: { anchors: string[]; columns: string[] };
   sample?: boolean;
+  /** A drawn box floating at a fixed spot: how far Head Office moved it sideways, in mm. */
+  nudge?: number;
 }
 
 export type ImageRole = "golden_pay_logo" | "golden_pay_stamp" | "client_logo" | "unknown";

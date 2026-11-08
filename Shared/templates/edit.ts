@@ -269,3 +269,120 @@ export function renamePlace(pkg: DocxPackage, from: string, to: string): boolean
   }
   return found;
 }
+
+// ───────────── drawn checkbox positions ─────────────
+
+const EMU_PER_MM = 36000;
+const PT_PER_MM = 72 / 25.4;
+
+/** The floating drawn shapes a place wraps: DrawingML anchors and their legacy VML copies. */
+function floatingShapes(pkg: DocxPackage, name: string): { anchors: El[]; vml: El[] } {
+  for (const part of pkg.textParts()) {
+    const root = pkg.xml(part).documentElement as El;
+    const start = descendants(root, "bookmarkStart").find((el) => attr(el, "name") === name);
+    if (!start) continue;
+    const end = descendants(root, "bookmarkEnd").find((el) => attr(el, "id") === attr(start, "id"));
+    const anchors: El[] = [];
+    const vml: El[] = [];
+    for (let node = start.nextSibling; node && node !== end; node = node.nextSibling) {
+      if (node.nodeType !== 1) continue;
+      anchors.push(...descendants(node as El, "anchor", NS.wp));
+      vml.push(
+        ...["rect", "shape", "roundrect", "oval"]
+          .flatMap((shape) => descendants(node as El, shape, NS.v))
+          .filter((shape) => /position:\s*absolute/.test(shape.getAttribute("style") ?? "")),
+      );
+    }
+    return { anchors, vml };
+  }
+  throw new PlaceError("This point is not in the layout");
+}
+
+/** Whether a place is a drawn box floating at a fixed spot (rather than flowing with the text). */
+export function isFloatingBox(pkg: DocxPackage, name: string): boolean {
+  try {
+    const { anchors, vml } = floatingShapes(pkg, name);
+    return anchors.length > 0 || vml.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Where a floating drawn box sits from the left, in mm (null when it flows with the text). */
+export function boxOffset(pkg: DocxPackage, name: string): number | null {
+  const { anchors, vml } = floatingShapes(pkg, name);
+  const position = anchors[0] ? descendants(anchors[0], "positionH", NS.wp)[0] : undefined;
+  const offset = position ? descendants(position, "posOffset", NS.wp)[0] : undefined;
+  if (offset) return Math.round((Number(offset.textContent ?? 0) / EMU_PER_MM) * 10) / 10;
+  const margin = /margin-left:\s*(-?[\d.]+)pt/.exec(vml[0]?.getAttribute("style") ?? "");
+  return margin ? Math.round((Number(margin[1]) / PT_PER_MM) * 10) / 10 : null;
+}
+
+/**
+ * Moves a floating drawn box sideways by `dxMm` millimetres (positive: to the right), in both
+ * the modern drawing and its legacy copy, so Word and LibreOffice draw it at the same spot.
+ * Only the box moves; the client's text stays where it is.
+ */
+export function nudgeBox(pkg: DocxPackage, name: string, dxMm: number): void {
+  const { anchors, vml } = floatingShapes(pkg, name);
+  if (!anchors.length && !vml.length) throw new PlaceError("This box flows with the text, so it already stays next to its option");
+  for (const anchor of anchors) {
+    const position = descendants(anchor, "positionH", NS.wp)[0];
+    const offset = position ? descendants(position, "posOffset", NS.wp)[0] : undefined;
+    if (!offset) throw new PlaceError("Word aligns this box automatically; it cannot be moved by a fixed amount");
+    offset.textContent = String(Math.round(Number(offset.textContent ?? 0) + dxMm * EMU_PER_MM));
+  }
+  for (const shape of vml) {
+    const style = shape.getAttribute("style") ?? "";
+    const match = /margin-left:\s*(-?[\d.]+)pt/.exec(style);
+    if (!match) continue;
+    const moved = Math.round((Number(match[1]) + dxMm * PT_PER_MM) * 100) / 100;
+    shape.setAttribute("style", style.replace(match[0], `margin-left:${moved}pt`));
+  }
+}
+
+/**
+ * A small document holding only the part of the page around some places: the rows of the
+ * table (or the paragraphs) that contain them, with the page's size and margins, and no
+ * header or footer. Used to preview a few boxes quickly.
+ */
+export function excerptLayout(bytes: Uint8Array, names: string[]): Uint8Array {
+  const pkg = DocxPackage.open(bytes);
+  const root = pkg.xml("word/document.xml").documentElement as El;
+  const body = child(root, "body");
+  if (!body) throw new PlaceError("The layout has no body");
+  const starts = descendants(body, "bookmarkStart").filter((el) => names.includes(attr(el, "name") ?? ""));
+  if (!starts.length) throw new PlaceError("These boxes are not in the page body");
+  const topOf = (node: El): El => {
+    let current = node;
+    while (current.parentNode && current.parentNode !== body) current = current.parentNode as El;
+    return current;
+  };
+  const blocks = new Set(starts.map(topOf));
+  for (const block of children(body)) {
+    const kind = local(block);
+    if (kind === "sectPr") {
+      for (const name of ["headerReference", "footerReference", "titlePg"]) for (const item of children(block, name)) remove(item);
+      continue;
+    }
+    if (!blocks.has(block)) {
+      remove(block);
+      continue;
+    }
+    if (kind === "tbl") {
+      for (const row of children(block, "tr")) {
+        const marks = descendants(row, "bookmarkStart");
+        if (!starts.some((start) => marks.includes(start))) remove(row);
+      }
+    }
+  }
+  // Word needs a paragraph after a table at the end of the body.
+  const last = children(body).filter((node) => local(node) !== "sectPr").pop();
+  if (last && local(last) === "tbl") {
+    const sect = child(body, "sectPr");
+    const paragraph = wEl(root.ownerDocument!, "p");
+    if (sect) body.insertBefore(paragraph, sect);
+    else body.appendChild(paragraph);
+  }
+  return pkg.save();
+}
