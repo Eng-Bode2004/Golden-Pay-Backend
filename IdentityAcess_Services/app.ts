@@ -85,6 +85,8 @@ async function forward(req: Request, pathname: string, url: URL): Promise<Respon
       headers,
       body: req.method === "GET" || req.method === "HEAD" ? undefined : req.body,
       redirect: "manual",
+      // A request the browser gave up on stops waiting in the services too.
+      signal: req.signal,
     });
     return new Response(response.body, { status: response.status, headers: response.headers });
   } catch {
@@ -276,6 +278,9 @@ async function bootstrap(): Promise<void> {
     development: !env.isProduction,
     maxRequestBodySize:
       env.maxUploadBytes * 2 + env.maxJsonBytes + 1024 * 1024,
+    // Report previews and PDFs are built while the request waits (often more than Bun's
+    // default 10 seconds); 255 s is Bun's maximum.
+    idleTimeout: 255,
     fetch: handleRequest,
   });
 

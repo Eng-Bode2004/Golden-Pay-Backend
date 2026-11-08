@@ -95,6 +95,8 @@ export async function renderDocxReport(options: {
   approved: boolean;
   preview?: "labels" | null;
   slots?: { anchor: string; kind: string }[] | null;
+  /** Skips the conversion if the request that wanted it went away before its turn. */
+  signal?: AbortSignal;
 }): Promise<DocxReport> {
   const rendered = renderTemplate(options.layout, options.bindings, {
     definition: options.definition,
@@ -106,7 +108,7 @@ export async function renderDocxReport(options: {
     preview: options.preview ?? null,
     slots: options.slots ?? null,
   });
-  const pdf = await docxToPdf(rendered.docx);
+  const pdf = await docxToPdf(rendered.docx, options.signal);
   return { docx: rendered.docx, pdf: pdf.bytes, pages: pdf.pages, engine: pdf.engine, issues: rendered.issues };
 }
 

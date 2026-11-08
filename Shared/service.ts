@@ -93,7 +93,15 @@ export async function startService(options: ServiceOptions): Promise<void> {
     await applySchema(schema);
     await seed?.();
     // Internal services are reached only through the Identity API on the same machine.
-    const server = Bun.serve({ hostname: process.env.INTERNAL_HOST ?? "127.0.0.1", port, maxRequestBodySize: 32 * 1024 * 1024, fetch: handle });
+    // Report previews and PDFs wait for the Word conversion before answering; Bun's default
+    // 10-second idle limit would close those requests half way.
+    const server = Bun.serve({
+      hostname: process.env.INTERNAL_HOST ?? "127.0.0.1",
+      port,
+      maxRequestBodySize: 32 * 1024 * 1024,
+      idleTimeout: 255,
+      fetch: handle,
+    });
     logger.info("service.started", { service: name, port: server.port });
 
     const stop = async () => {

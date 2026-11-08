@@ -13,7 +13,7 @@ import { getStoredFile, putStoredFile } from "../IdentityAcess_Services/Utils/fi
 import { ApiError, created, ok, readJson, type RequestContext } from "../IdentityAcess_Services/Utils/http.ts";
 import type { Router } from "../IdentityAcess_Services/Utils/router.ts";
 import { optionalText, requiredText } from "../Shared/service.ts";
-import { availableEngine, ConverterUnavailable, docToDocx, docxToPdf, pdfToDocx } from "../Shared/templates/convert.ts";
+import { availableEngine, ConversionCancelled, ConverterUnavailable, docToDocx, docxToPdf, pdfToDocx } from "../Shared/templates/convert.ts";
 import {
   allFields,
   BLOCKS,
@@ -59,6 +59,13 @@ function nextAnchor(slots: Slot[], prefix: string): string {
   while (taken.has(`${prefix}${String(n).padStart(3, "0")}`)) n += 1;
   return `${prefix}${String(n).padStart(3, "0")}`;
 }
+
+/** Recent checkbox previews, by version, save time and boxes: clicking back to a question is instant. */
+const boxPreviews = new Map<string, Uint8Array>();
+const pdfResponse = (pdf: Uint8Array) =>
+  new Response(pdf as unknown as BodyInit, {
+    headers: { "Content-Type": "application/pdf", "Content-Disposition": 'inline; filename="boxes.pdf"', "Cache-Control": "no-store" },
+  });
 
 /** The boxes of the checkbox question a box belongs to (boxes bound to the same answer). */
 function boxGroup(version: Row, anchor: string | null | undefined): Slot[] {
@@ -1064,6 +1071,9 @@ export function registerTemplateRoutes(router: Router): void {
       const version = await findVersion(context.params.version_id);
       if (version.layout_mode !== "docx" || !version.layout_path) throw ApiError.badRequest("This version has no client layout");
       const group = boxGroup(version, context.url.searchParams.get("anchor"));
+      const cacheKey = `${version.version_id}:${String(version.updated_at)}:${group.map((slot) => slot.anchor).join(",")}`;
+      const cached = boxPreviews.get(cacheKey);
+      if (cached) return pdfResponse(cached);
       let layout: Uint8Array;
       try {
         layout = excerptLayout(await loadFile(version.layout_path as string), group.map((slot) => slot.anchor));
@@ -1096,12 +1106,18 @@ export function registerTemplateRoutes(router: Router): void {
           images: {},
           evidence: { photos: {}, locations: [] },
           approved: false,
+          signal: context.req.signal,
         });
-        return new Response(report.pdf as unknown as BodyInit, {
-          headers: { "Content-Type": "application/pdf", "Content-Disposition": 'inline; filename="boxes.pdf"', "Cache-Control": "no-store" },
-        });
+        boxPreviews.set(cacheKey, report.pdf);
+        // Keep the last few previews only.
+        for (const key of boxPreviews.keys()) {
+          if (boxPreviews.size <= 40) break;
+          boxPreviews.delete(key);
+        }
+        return pdfResponse(report.pdf);
       } catch (error) {
         if (error instanceof ConverterUnavailable) throw new ApiError(503, "CONVERTER_UNAVAILABLE", error.message);
+        if (error instanceof ConversionCancelled) throw new ApiError(409, "PREVIEW_CANCELLED", "The preview was cancelled");
         throw error;
       }
     }),

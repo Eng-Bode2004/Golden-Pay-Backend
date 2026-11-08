@@ -17,6 +17,16 @@ export type Engine = "libreoffice" | "word";
 
 const WORD_SCRIPT = join(import.meta.dir, "word-convert.ps1");
 const TIMEOUT_MS = Number(process.env.REPORT_CONVERT_TIMEOUT_MS ?? 120_000);
+// One LibreOffice profile reused by every conversion: building a fresh one costs several
+// seconds each time. Conversions run one at a time, so it is never used twice at once.
+const PROFILE_DIR = join(tmpdir(), "gp-libreoffice-profile");
+
+/** The request that wanted this conversion went away before its turn came. */
+export class ConversionCancelled extends Error {
+  constructor() {
+    super("The conversion was cancelled");
+  }
+}
 
 function sofficePath(): string | null {
   const candidates = [
@@ -84,10 +94,13 @@ async function convert(
   bytes: Uint8Array,
   from: "docx" | "doc" | "pdf",
   to: "pdf" | "docx",
+  signal?: AbortSignal,
 ): Promise<{ bytes: Uint8Array; pages: number | null; engine: Engine }> {
   const engine = await availableEngine();
   if (!engine) throw new ConverterUnavailable();
   return serial(async () => {
+    // A preview nobody waits for any more does not hold up the ones behind it.
+    if (signal?.aborted) throw new ConversionCancelled();
     const dir = join(tmpdir(), `gp-convert-${crypto.randomUUID()}`);
     await mkdir(dir, { recursive: true });
     const input = join(dir, `input.${from}`);
@@ -103,20 +116,30 @@ async function convert(
         pages = Number(/pages=(\d+)/.exec(out)?.[1] ?? NaN) || null;
       } else {
         const filter = to === "pdf" ? "pdf:writer_pdf_Export" : "docx:MS Word 2007 XML";
-        await run(
-          [
-            sofficePath()!,
-            `-env:UserInstallation=file:///${join(dir, "profile").replace(/\\/g, "/")}`,
-            "--headless",
-            "--norestore",
-            "--convert-to",
-            filter,
-            "--outdir",
-            dir,
-            input,
-          ],
-          "LibreOffice conversion",
-        );
+        const libreoffice = (profile: string) =>
+          run(
+            [
+              sofficePath()!,
+              `-env:UserInstallation=file:///${profile.replace(/\\/g, "/")}`,
+              "--headless",
+              "--norestore",
+              "--convert-to",
+              filter,
+              "--outdir",
+              dir,
+              input,
+            ],
+            "LibreOffice conversion",
+          );
+        try {
+          await libreoffice(PROFILE_DIR);
+          if (!existsSync(output)) throw new Error("LibreOffice produced no file");
+        } catch {
+          // A damaged shared profile: remove it (the next conversion builds it again) and
+          // convert this file with a fresh profile of its own, as before.
+          await rm(PROFILE_DIR, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+          await libreoffice(join(dir, "profile"));
+        }
       }
       if (!existsSync(output)) throw new Error(`${engine} produced no ${to} file`);
       const result = new Uint8Array(await readFile(output));
@@ -134,7 +157,7 @@ export class ConverterUnavailable extends Error {
   }
 }
 
-export const docxToPdf = (bytes: Uint8Array) => convert(bytes, "docx", "pdf");
+export const docxToPdf = (bytes: Uint8Array, signal?: AbortSignal) => convert(bytes, "docx", "pdf", signal);
 export const docToDocx = (bytes: Uint8Array) => convert(bytes, "doc", "docx");
 /** Word can turn a PDF into an editable document; LibreOffice cannot do this well. */
 export const pdfToDocx = (bytes: Uint8Array) => convert(bytes, "pdf", "docx");
