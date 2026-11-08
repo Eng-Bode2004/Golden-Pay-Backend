@@ -29,6 +29,7 @@ import { verifySignupToken, signSignupToken, type SignupTokenClaims } from "../U
 import UserModel, { type User } from "../Models/UserSchema.ts";
 import { DatabaseConflict } from "../Config/db.ts";
 import EmployeeRecordModel from "../Models/EmployeeRecordSchema.ts";
+import RefreshSessionModel from "../Models/RefreshSessionSchema.ts";
 import BiometricCredentialModel from "../Models/BiometricCredentialSchema.ts";
 import { env } from "../Config/env.ts";
 import { logger } from "../Utils/logger.ts";
@@ -89,6 +90,8 @@ export interface SignupCompleted {
   message: string;
 }
 
+/** How long a refresh token may be sent again after its reply was lost (see refreshTokens). */
+const REFRESH_RETRY_GRACE_MS = 60_000;
 const DUMMY_PASSWORD_HASH = await Bun.password.hash(
   "identity-service-timing-safety-dummy-password",
   { algorithm: "argon2id" },
@@ -765,9 +768,33 @@ export async function refreshTokens(
     throw ApiError.unauthorized("Invalid refresh token");
   }
 
-  const session = await findSessionByRefreshToken(refreshToken);
+  let session = await findSessionByRefreshToken(refreshToken);
   if (!session) {
     throw ApiError.unauthorized("Invalid refresh token");
+  }
+
+  // The reply to a refresh can be lost (the connection dropped or the server restarted after
+  // rotating). The browser then sends the same token again moments later. Within a short
+  // window, and only while the session that replaced it is still unused, rotate that
+  // replacement instead of treating the retry as a stolen token.
+  if (
+    session.revoked_at &&
+    session.revoked_reason === "rotated" &&
+    session.replaced_by_session_id &&
+    Date.now() - session.revoked_at.getTime() < REFRESH_RETRY_GRACE_MS
+  ) {
+    const replacement = await RefreshSessionModel.findOne({ session_id: session.replaced_by_session_id });
+    if (replacement && !replacement.revoked_at && replacement.user_id === session.user_id) {
+      await recordAudit({
+        event: "auth.refresh.retry",
+        userId: session.user_id,
+        success: true,
+        reason: "lost_refresh_reply",
+        context,
+        metadata: { session_id: session.session_id, replacement_session_id: replacement.session_id },
+      });
+      session = replacement;
+    }
   }
 
   if (session.revoked_at) {

@@ -115,6 +115,9 @@ function stopAll(signal: string): void {
   setTimeout(() => process.exit(0), 8000).unref();
   void Promise.all([...running.values()].map((child) => child.exited)).then(() => process.exit(0));
 }
+// The launcher must outlive any slip: it is what restarts the services.
+process.on("unhandledRejection", (reason) => log("error", "launcher: unhandled rejection", { error: String(reason) }));
+process.on("uncaughtException", (error) => log("error", "launcher: uncaught exception", { error: String(error) }));
 process.on("SIGTERM", () => stopAll("SIGTERM"));
 process.on("SIGINT", () => stopAll("SIGINT"));
 

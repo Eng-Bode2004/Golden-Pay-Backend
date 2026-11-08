@@ -9,7 +9,7 @@
  * its own process with a timeout, one at a time, because both engines dislike sharing.
  */
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,9 +17,10 @@ export type Engine = "libreoffice" | "word";
 
 const WORD_SCRIPT = join(import.meta.dir, "word-convert.ps1");
 const TIMEOUT_MS = Number(process.env.REPORT_CONVERT_TIMEOUT_MS ?? 120_000);
-// One LibreOffice profile reused by every conversion: building a fresh one costs several
-// seconds each time. Conversions run one at a time, so it is never used twice at once.
-const PROFILE_DIR = join(tmpdir(), "gp-libreoffice-profile");
+// Each LibreOffice conversion gets its own profile (so a stuck or crashed run can never block
+// the next one), copied from a ready-made one: building a profile from nothing costs
+// several seconds.
+const SEED_PROFILE = join(tmpdir(), "gp-libreoffice-seed");
 
 /** The request that wanted this conversion went away before its turn came. */
 export class ConversionCancelled extends Error {
@@ -82,7 +83,7 @@ function serial<T>(task: () => Promise<T>): Promise<T> {
 
 async function run(command: string[], label: string): Promise<string> {
   const proc = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
-  const timer = setTimeout(() => proc.kill(), TIMEOUT_MS);
+  const timer = setTimeout(() => proc.kill("SIGKILL"), TIMEOUT_MS);
   const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
   const code = await proc.exited;
   clearTimeout(timer);
@@ -116,8 +117,10 @@ async function convert(
         pages = Number(/pages=(\d+)/.exec(out)?.[1] ?? NaN) || null;
       } else {
         const filter = to === "pdf" ? "pdf:writer_pdf_Export" : "docx:MS Word 2007 XML";
-        const libreoffice = (profile: string) =>
-          run(
+        const profile = join(dir, "profile");
+        const seeded = existsSync(SEED_PROFILE) && (await cp(SEED_PROFILE, profile, { recursive: true }).then(() => true, () => false));
+        try {
+          await run(
             [
               sofficePath()!,
               `-env:UserInstallation=file:///${profile.replace(/\\/g, "/")}`,
@@ -131,14 +134,16 @@ async function convert(
             ],
             "LibreOffice conversion",
           );
-        try {
-          await libreoffice(PROFILE_DIR);
-          if (!existsSync(output)) throw new Error("LibreOffice produced no file");
-        } catch {
-          // A damaged shared profile: remove it (the next conversion builds it again) and
-          // convert this file with a fresh profile of its own, as before.
-          await rm(PROFILE_DIR, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
-          await libreoffice(join(dir, "profile"));
+        } finally {
+          // LibreOffice's real worker (soffice.bin) can outlive a launcher that was stopped;
+          // whatever still runs for this conversion is ended, so nothing piles up in memory.
+          await killLeftovers(dir);
+        }
+        if (existsSync(output) && !seeded && !existsSync(SEED_PROFILE)) {
+          await cp(profile, SEED_PROFILE, { recursive: true }).catch(() => rm(SEED_PROFILE, { recursive: true, force: true }).catch(() => {}));
+        } else if (!existsSync(output) && seeded) {
+          // A damaged ready-made profile: drop it; the next conversion builds a new one.
+          await rm(SEED_PROFILE, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
         }
       }
       if (!existsSync(output)) throw new Error(`${engine} produced no ${to} file`);
@@ -149,6 +154,25 @@ async function convert(
       await rm(dir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
     }
   });
+}
+
+/** Ends every process whose command line mentions `marker` (Linux; elsewhere nothing to do). */
+async function killLeftovers(marker: string): Promise<void> {
+  if (process.platform !== "linux") return;
+  let pids: string[];
+  try {
+    pids = (await readdir("/proc")).filter((name) => /^\d+$/.test(name) && Number(name) !== process.pid);
+  } catch {
+    return;
+  }
+  for (const pid of pids) {
+    try {
+      const cmdline = (await readFile(`/proc/${pid}/cmdline`, "utf8")).replaceAll("\0", " ");
+      if (cmdline.includes(marker)) process.kill(Number(pid), "SIGKILL");
+    } catch {
+      // The process already ended, or belongs to someone else.
+    }
+  }
 }
 
 export class ConverterUnavailable extends Error {

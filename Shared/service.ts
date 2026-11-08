@@ -15,6 +15,7 @@ import {
   type RequestContext,
 } from "../IdentityAcess_Services/Utils/http.ts";
 import { logger } from "../IdentityAcess_Services/Utils/logger.ts";
+import { keepServiceAlive } from "../IdentityAcess_Services/Utils/keep-alive.ts";
 import type { Router } from "../IdentityAcess_Services/Utils/router.ts";
 
 export interface ServiceOptions {
@@ -88,6 +89,7 @@ export async function startService(options: ServiceOptions): Promise<void> {
     }
   }
 
+  keepServiceAlive(name);
   try {
     await connectDatabase();
     await applySchema(schema);

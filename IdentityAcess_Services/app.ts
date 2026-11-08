@@ -12,6 +12,7 @@ import {
 import type { RequestContext } from "./Utils/http.ts";
 import { toApiError } from "./MIddlewares/error.middleware.ts";
 import { logger } from "./Utils/logger.ts";
+import { keepServiceAlive } from "./Utils/keep-alive.ts";
 import { newId } from "./Utils/crypto.ts";
 
 const router = createRouter();
@@ -272,6 +273,7 @@ async function connectWithRetry(): Promise<void> {
 }
 
 async function bootstrap(): Promise<void> {
+  keepServiceAlive(env.serviceName);
   const server = Bun.serve({
     hostname: process.env.LISTEN_HOST ?? "0.0.0.0",
     port: env.port,

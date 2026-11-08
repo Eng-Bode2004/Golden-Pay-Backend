@@ -1,7 +1,7 @@
 import { SqlModel, type SqlDocument } from "./SqlModel.ts";
 const AUDIT_EVENTS = [
   "auth.login.password", "auth.login.biometric", "auth.login.failed", "auth.refresh",
-  "auth.refresh.reuse_detected", "auth.logout", "auth.password.changed", "profile.updated",
+  "auth.refresh.reuse_detected", "auth.refresh.retry", "auth.logout", "auth.password.changed", "profile.updated",
   "signup.existing.started", "signup.existing.completed", "signup.new.completed", "account.approved",
   "account.rejected", "account.suspended", "account.reactivated", "biometric.registered",
   "biometric.revoked", "employee.imported", "role.assigned", "user.created_by_admin",
