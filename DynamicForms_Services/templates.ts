@@ -1325,8 +1325,10 @@ export function registerTemplateRoutes(router: Router): void {
       if (!canApprove(auth)) throw ApiError.forbidden("You cannot approve templates");
       const version = await findVersion(context.params.version_id);
       if (version.status !== "in_review") throw new ApiError(409, "INVALID_STATUS_TRANSITION", "This version is not waiting for review");
-      const selfApproval = process.env.TEMPLATE_ALLOW_SELF_APPROVAL === "true";
-      if (!selfApproval && (version.submitted_by === auth.user.user_id || version.created_by === auth.user.user_id)) {
+      // The Head Office member who prepared a version may approve it. Set
+      // TEMPLATE_REQUIRE_SECOND_APPROVER=true to require a different member instead.
+      const secondApprover = process.env.TEMPLATE_REQUIRE_SECOND_APPROVER === "true";
+      if (secondApprover && (version.submitted_by === auth.user.user_id || version.created_by === auth.user.user_id)) {
         throw new ApiError(403, "FOUR_EYES_REQUIRED", "Another Head Office member must approve a version you prepared");
       }
       // What is approved must be exactly what was reviewed.

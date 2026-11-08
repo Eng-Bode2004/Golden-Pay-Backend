@@ -209,9 +209,10 @@ Near-identical layouts shared by different clients (Bedayty, Global and MIDBANK)
 ### Review, approval and immutability
 
 `draft → in_review → approved → active → retired`; a reviewer may return a version to
-draft with a note. Submitting needs every blocking warning resolved. Approval needs a
-second Head Office member (`TEMPLATE_ALLOW_SELF_APPROVAL=true` only for a one-person
-office) and checks that the content hash is the one that was reviewed. A database trigger
+draft with a note. Submitting needs every blocking warning resolved. Any Head Office member
+with `templates:approve` can approve, including the one who prepared the version (set
+`TEMPLATE_REQUIRE_SECOND_APPROVER=true` to require a different member). Approval checks
+that the content hash is the one that was reviewed. A database trigger
 (`gp_template_version_guard`) refuses any change or deletion of a version that left
 draft. Each case stores `template_version_id`, `template_version_no` and
 `template_hash`, so it always reports with the version it was sent with. Every step is in

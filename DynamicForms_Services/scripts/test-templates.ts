@@ -1,5 +1,5 @@
 // End-to-end check of client report templates through the public API on port 4001:
-// upload → classification → draft → validation → four-eyes approval → activation →
+// upload → classification → draft → validation → approval → activation →
 // immutability → a case pinned to the exact version → evidence rules → client-layout
 // report → stamp on approval → audit trail. Creates temporary accounts and a temporary
 // template family, and removes everything it made.
@@ -182,14 +182,14 @@ try {
   // ── review ──
   const submitted = await call(o1, `/forms/admin/versions/${versionId}/submit`, post({ change_note: "اختبار" }));
   await expectError(o1, `/forms/admin/versions/${versionId}`, patch({ change_note: "x" }), "TEMPLATE_VERSION_LOCKED");
-  await expectError(o1, `/forms/admin/versions/${versionId}/approve`, post({ activate: true }), "FOUR_EYES_REQUIRED");
-  pass("submitted version is locked; its author cannot approve it");
+  pass("submitted version is locked");
 
-  await call(o2, `/forms/admin/versions/${versionId}/approve`, post({ activate: true, note: "تمت المراجعة" }));
+  // The member who prepared it approves it; no second member is needed.
+  await call(o1, `/forms/admin/versions/${versionId}/approve`, post({ activate: true, note: "تمت المراجعة" }));
   await call(o2, `/forms/admin/templates/${templateId}`, patch({ active: true }));
   detail = await call(o1, `/forms/admin/versions/${versionId}`);
   if (detail.version.status !== "active" || detail.version.content_hash !== submitted.content_hash) fail("Activation failed");
-  pass("a second Head Office member approves and activates; the approved content hash is the reviewed one");
+  pass("its author approves and activates it; the approved content hash is the reviewed one");
 
   // The database itself refuses to change an approved version.
   for (const sql of [
