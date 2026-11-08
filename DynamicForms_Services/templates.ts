@@ -34,6 +34,7 @@ import {
   PlaceError,
   type PlaceTarget,
   placeHasContent,
+  removeBox,
   removePlace,
   renamePlace,
   wrapPlace,
@@ -958,8 +959,13 @@ export function registerTemplateRoutes(router: Router): void {
       let anchor = optionalText(body.anchor, 40) ?? "";
       try {
         if (op === "remove") {
-          if (!anchor.startsWith("gp_u")) throw new PlaceError("Only points added by hand can be removed; unbind the others instead");
-          removePlace(pkg, anchor);
+          const slot = slots.find((item) => item.anchor === anchor);
+          if (slot?.kind === "checkbox") {
+            // An option's box on the client's page: the box and its place go; the words stay.
+            if (!removeBox(pkg, anchor)) removePlace(pkg, anchor);
+          } else if (!anchor.startsWith("gp_u")) {
+            throw new PlaceError("Only points added by hand and checkboxes can be removed; unbind the others instead");
+          } else removePlace(pkg, anchor);
           slots = slots.filter((slot) => slot.anchor !== anchor);
           bindings = bindings.filter((binding) => binding.anchor !== anchor);
         } else if (op === "move") {
@@ -1074,7 +1080,7 @@ export function registerTemplateRoutes(router: Router): void {
           JSON.stringify(slots),
           JSON.stringify(bindings),
           JSON.stringify(definition),
-          historyWith(version, op === "create" ? "إضافة نقطة" : op === "move" ? "نقل نقطة" : "حذف نقطة", ["slots", "bindings", "definition"]),
+          historyWith(version, op === "create" ? "إضافة نقطة" : op === "move" ? "نقل نقطة" : "حذف نقطة أو مربع", ["slots", "bindings", "definition"]),
         ],
       );
       if (!rows[0]) throw new ApiError(409, "TEMPLATE_VERSION_LOCKED", "This version is no longer a draft");

@@ -4,7 +4,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { attr, descendants, DocxPackage, type El, NS, textOf } from "../docx.ts";
-import { excerptLayout, isFloatingBox, nudgeBox, PlaceError } from "../edit.ts";
+import { excerptLayout, isFloatingBox, nudgeBox, PlaceError, removeBox } from "../edit.ts";
+import { renderTemplate } from "../render.ts";
 import { scanTemplate } from "../scan.ts";
 
 const ARCHIVE = join(import.meta.dir, "..", "..", "..", "..", "Investigation Forms");
@@ -67,4 +68,44 @@ describe("floating drawn checkboxes", () => {
     expect(textOf(root)).toContain("ضامن");
     expect(textOf(root)).not.toContain("المؤمن عليهم");
   });
+});
+
+describe("deleting an option's box", () => {
+  const forms = [
+    ["Mogo Company", "استعلام تجار", "استعلام تجار.docx"],
+    ["Bedayty Company", "استعلام سكن", "بدايتي س.docx"],
+    ["Credit agricole Bank", "استعلام عيادة", "استعلام عيادة.docx"],
+    ["QNB Bank", "تقرير سكن", "تقرير سكن كيو ان بى.docx"],
+  ];
+  /** Box marks on a page: Word checkboxes, box characters and drawn squares. */
+  const boxCount = (pkg: DocxPackage) => {
+    const root = pkg.xml("word/document.xml").documentElement as El;
+    const controlBoxes = descendants(root, "sdt").filter((sdt) => descendants(sdt, "checkbox", NS.w14).length);
+    // A Word checkbox control also holds a ☐ character: count it once.
+    const inControls = controlBoxes.reduce((sum, sdt) => sum + (textOf(sdt).match(/[☐☑☒□■▢◻◼]/g) ?? []).length, 0);
+    const chars = (textOf(root).match(/[☐☑☒□■▢◻◼]/g) ?? []).length - inControls;
+    const controls = controlBoxes.length;
+    const drawn = descendants(root, "drawing").filter((d) => !descendants(d, "blip", NS.a).length).length;
+    return chars + controls + drawn;
+  };
+
+  for (const path of forms) {
+    test(`${path[0]}: the box and its place go, the option's words stay`, () => {
+      const scan = scanTemplate(new Uint8Array(readFileSync(join(ARCHIVE, ...path))));
+      const box = scan.slots.find((slot) => slot.kind === "checkbox" && slot.option && slot.part === "word/document.xml");
+      expect(box).toBeDefined();
+      const pkg = DocxPackage.open(scan.docx);
+      const before = boxCount(pkg);
+      const words = textOf(pkg.xml("word/document.xml").documentElement as El).replace(/[☐☑☒□■▢◻◼\s]/g, "");
+      expect(removeBox(pkg, box!.anchor)).toBe(true);
+      const saved = DocxPackage.open(pkg.save());
+      const root = saved.xml("word/document.xml").documentElement as El;
+      expect(boxCount(saved)).toBe(before - 1);
+      expect(descendants(root, "bookmarkStart").some((mark) => attr(mark, "name") === box!.anchor)).toBe(false);
+      expect(textOf(root).replace(/[☐☑☒□■▢◻◼\s]/g, "")).toBe(words);
+      // The rest of the question still prints.
+      const bindings = scan.bindings.filter((binding) => binding.anchor !== box!.anchor);
+      expect(() => renderTemplate(saved.save(), bindings, { definition: scan.definition, answers: {}, caseValues: {}, images: {}, evidence: { photos: {}, locations: [] } })).not.toThrow();
+    });
+  }
 });

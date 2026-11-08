@@ -4,7 +4,7 @@
  * the same order the mapper page uses) and a character offset inside that paragraph.
  * Only bookmarks change: the client's text, tables and formatting are untouched.
  */
-import { ancestor, attr, children, child, descendants, DocxPackage, type El, insertAfter, local, NS, remove, textOf, wEl } from "./docx.ts";
+import { ancestor, attr, children, child, descendants, DocxPackage, type El, insertAfter, local, NS, remove, symText, textOf, wEl } from "./docx.ts";
 
 /** Paragraphs of a part in document order, without the legacy duplicates Word keeps in fallbacks. */
 export function paragraphsOf(pkg: DocxPackage, part: string): El[] {
@@ -397,4 +397,61 @@ export function excerptLayout(bytes: Uint8Array, names: string[], pick?: (pkg: D
     else body.appendChild(paragraph);
   }
   return pkg.save();
+}
+
+/** Characters that draw a checkbox in a client's text. */
+const BOX_CHARS = /[☐☑☒□■▢◻◼✓✔]/g;
+
+/**
+ * Deletes a checkbox from the page together with its place: a Word checkbox control, a box
+ * character (☐, or a Wingdings box symbol), or a small drawn square. Words around it stay.
+ * Returns false when the place holds no box.
+ */
+export function removeBox(pkg: DocxPackage, name: string): boolean {
+  for (const part of pkg.textParts()) {
+    const root = pkg.xml(part).documentElement as El;
+    const start = descendants(root, "bookmarkStart").find((el) => attr(el, "name") === name);
+    if (!start) continue;
+    const end = descendants(root, "bookmarkEnd").find((el) => attr(el, "id") === attr(start, "id"));
+    const inside: El[] = [];
+    for (let node = start.nextSibling; node && node !== end; node = node.nextSibling) if (node.nodeType === 1) inside.push(node as El);
+    let removed = false;
+    for (const node of inside) {
+      const kind = local(node);
+      if (kind === "sdt" && descendants(node, "checkbox", NS.w14).length) {
+        remove(node);
+        removed = true;
+        continue;
+      }
+      const runs = kind === "r" ? [node] : descendants(node, "r");
+      for (const run of runs) {
+        // A drawn square (a shape without a picture) or a Wingdings box symbol.
+        const drawing = children(run).find((item) => ["drawing", "pict", "AlternateContent"].includes(local(item)));
+        if (drawing && !descendants(drawing, "blip", NS.a).length && !descendants(drawing, "imagedata", NS.v).length) {
+          remove(drawing);
+          removed = true;
+        }
+        for (const sym of children(run, "sym")) {
+          if (symText(sym)) {
+            remove(sym);
+            removed = true;
+          }
+        }
+        for (const t of children(run, "t")) {
+          const text = t.textContent ?? "";
+          const cleaned = text.replace(BOX_CHARS, "");
+          if (cleaned !== text) {
+            t.textContent = cleaned;
+            t.setAttributeNS("http://www.w3.org/XML/1998/namespace", "xml:space", "preserve");
+            removed = true;
+          }
+        }
+        if (!children(run).some((item) => local(item) !== "rPr" && (local(item) !== "t" || (item.textContent ?? "") !== ""))) remove(run);
+      }
+    }
+    if (!removed) return false;
+    removePlace(pkg, name);
+    return true;
+  }
+  return false;
 }

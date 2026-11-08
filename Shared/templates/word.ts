@@ -159,13 +159,13 @@ function checkEditable(node: El, places: Set<string>): void {
       if (descendants(item, "blip", NS.a).length || local(item) === "drawing" || local(item) === "pict" || local(item) === "AlternateContent") {
         throw new PlaceError("The selection includes a picture; move or delete pictures with the picture tools");
       }
-      throw new PlaceError("The selection includes a symbol or a Word field that cannot be typed over");
+      throw new PlaceError("The selection includes a checkbox or a Word field. To delete an option's box, click it in «ربط الحقول» and press «حذف المربع»");
     }
     return;
   }
   if (["bookmarkStart", "bookmarkEnd", "proofErr", "permStart", "permEnd"].includes(kind)) return;
   if (lengthOf(node) === 0) return;
-  throw new PlaceError("The selection includes a link, a form field or a tracked change that cannot be typed over");
+  throw new PlaceError("The selection includes a checkbox, a link or a form field. To delete an option's box, click it in «ربط الحقول» and press «حذف المربع»");
 }
 
 // ───────────── formatting ─────────────
