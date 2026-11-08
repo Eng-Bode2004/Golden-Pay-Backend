@@ -96,6 +96,8 @@ CREATE TABLE IF NOT EXISTS template_versions (
 );
 CREATE INDEX IF NOT EXISTS idx_template_versions_status ON template_versions (status, updated_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_template_active_version ON template_versions (template_id) WHERE status = 'active';
+-- Earlier states of a draft's page (newest first), so Head Office can undo edits.
+ALTER TABLE template_versions ADD COLUMN IF NOT EXISTS layout_history jsonb NOT NULL DEFAULT '[]';
 
 -- A version that left draft can never change: only its status may move forward.
 CREATE OR REPLACE FUNCTION gp_template_version_guard() RETURNS trigger AS $$

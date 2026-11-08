@@ -79,6 +79,27 @@ function splitRun(run: El, cut: number): El | null {
   return clone;
 }
 
+/**
+ * The paragraph-level node that starts at character `at` (splitting a run there when the
+ * spot falls inside one), or null for the paragraph's end.
+ */
+export function splitAt(paragraph: El, at: number): El | null {
+  let position = 0;
+  for (const node of children(paragraph)) {
+    const length = lengthOf(node);
+    if (!length) continue;
+    if (at === position) return node;
+    if (at < position + length) {
+      if (local(node) !== "r") throw new PlaceError("The selection starts or ends inside a link or a form field; select whole words around it");
+      const second = splitRun(node, at - position);
+      if (!second) throw new PlaceError("This text cannot be split here; select whole words");
+      return second;
+    }
+    position += length;
+  }
+  return null;
+}
+
 export interface PlaceTarget {
   part: string;
   paragraph: number;
@@ -213,22 +234,7 @@ export function wrapPlace(pkg: DocxPackage, name: string, target: PlaceTarget, e
   }
 
   /** The node a boundary at `at` goes before (splitting a run there), or null for the paragraph's end. */
-  const boundary = (at: number): El | null => {
-    let position = 0;
-    for (const node of children(paragraph)) {
-      const length = lengthOf(node);
-      if (!length) continue;
-      if (at === position) return node;
-      if (at < position + length) {
-        if (local(node) !== "r") throw new PlaceError("The selection starts or ends inside a link or a form field; select whole words around it");
-        const second = splitRun(node, at - position);
-        if (!second) throw new PlaceError("This text cannot be split here; select whole words");
-        return second;
-      }
-      position += length;
-    }
-    return null;
-  };
+  const boundary = (at: number) => splitAt(paragraph, at);
   const doc = paragraph.ownerDocument!;
   const id = String(nextBookmarkId(pkg));
   // The end first: splitting at the start never moves a node after it.
@@ -341,18 +347,25 @@ export function nudgeBox(pkg: DocxPackage, name: string, dxMm: number): void {
   }
 }
 
+function within(node: Node, holder: Node): boolean {
+  for (let current: Node | null = node; current; current = current.parentNode) if (current === holder) return true;
+  return false;
+}
+
 /**
  * A small document holding only the part of the page around some places: the rows of the
  * table (or the paragraphs) that contain them, with the page's size and margins, and no
  * header or footer. Used to preview a few boxes quickly.
  */
-export function excerptLayout(bytes: Uint8Array, names: string[]): Uint8Array {
+export function excerptLayout(bytes: Uint8Array, names: string[], pick?: (pkg: DocxPackage) => El[]): Uint8Array {
   const pkg = DocxPackage.open(bytes);
   const root = pkg.xml("word/document.xml").documentElement as El;
   const body = child(root, "body");
   if (!body) throw new PlaceError("The layout has no body");
-  const starts = descendants(body, "bookmarkStart").filter((el) => names.includes(attr(el, "name") ?? ""));
-  if (!starts.length) throw new PlaceError("These boxes are not in the page body");
+  const starts = pick
+    ? pick(pkg).filter((el) => within(el, body))
+    : descendants(body, "bookmarkStart").filter((el) => names.includes(attr(el, "name") ?? ""));
+  if (!starts.length) throw new PlaceError("This part is not in the page body; check it in the PDF preview");
   const topOf = (node: El): El => {
     let current = node;
     while (current.parentNode && current.parentNode !== body) current = current.parentNode as El;
@@ -371,8 +384,7 @@ export function excerptLayout(bytes: Uint8Array, names: string[]): Uint8Array {
     }
     if (kind === "tbl") {
       for (const row of children(block, "tr")) {
-        const marks = descendants(row, "bookmarkStart");
-        if (!starts.some((start) => marks.includes(start))) remove(row);
+        if (!starts.some((start) => within(start, row))) remove(row);
       }
     }
   }

@@ -40,6 +40,17 @@ import {
 } from "../Shared/templates/edit.ts";
 import { inventoryDocx, INVESTIGATION_TYPES, type ClientProfile, type InventoryRecord } from "../Shared/templates/inventory.ts";
 import { layoutHtml } from "../Shared/templates/preview.ts";
+import {
+  deletePicture,
+  editText,
+  movePicture,
+  nudgePicture,
+  paragraphText,
+  pictureInfo,
+  picturesOf,
+  resizePicture,
+  styleText,
+} from "../Shared/templates/word.ts";
 import { renderDocxReport, SAMPLE_CONTEXT, sampleAnswers, samplePhotoBytes } from "../Shared/templates/report.ts";
 import { type Binding, CASE_SOURCES, scanTemplate, type Slot } from "../Shared/templates/scan.ts";
 
@@ -66,6 +77,66 @@ const pdfResponse = (pdf: Uint8Array) =>
   new Response(pdf as unknown as BodyInit, {
     headers: { "Content-Type": "application/pdf", "Content-Disposition": 'inline; filename="boxes.pdf"', "Cache-Control": "no-store" },
   });
+
+/**
+ * A PDF of only the rows around some part of the page, filled with sample answers and
+ * converted like real reports. Cached per version state.
+ */
+async function excerptPreview(
+  version: Row,
+  cacheKey: string,
+  cut: (layout: Uint8Array) => Uint8Array,
+  signal: AbortSignal,
+  adjust?: (bindings: Binding[], answers: Record<string, unknown>) => void,
+): Promise<Response> {
+  const cached = boxPreviews.get(cacheKey);
+  if (cached) return pdfResponse(cached);
+  let layout: Uint8Array;
+  try {
+    layout = cut(await loadFile(version.layout_path as string));
+  } catch (error) {
+    if (error instanceof PlaceError) throw new ApiError(400, "PLACE_NOT_ALLOWED", error.message);
+    throw error;
+  }
+  // Only what is left in the excerpt is filled, so no appendix pages are added.
+  const present = new Set(
+    descendants(DocxPackage.open(layout).xml("word/document.xml").documentElement as El, "bookmarkStart").map((mark) => attr(mark, "name") ?? ""),
+  );
+  const bindings = ((version.bindings as Binding[]) ?? []).filter((binding) => present.has(binding.anchor));
+  const used = new Set(bindings.map((binding) => binding.source?.replace(/^answers\./, "")));
+  const full = version.definition as TemplateDefinition;
+  const definition: TemplateDefinition = {
+    ...full,
+    sections: full.sections.map((section) => ({ ...section, fields: section.fields.filter((field) => used.has(field.key)) })),
+  };
+  const answers = sampleAnswers(definition);
+  adjust?.(bindings, answers);
+  try {
+    const report = await renderDocxReport({
+      layout,
+      bindings,
+      slots: (version.slots as Slot[] | null) ?? null,
+      definition,
+      answers,
+      context: SAMPLE_CONTEXT,
+      images: {},
+      evidence: { photos: {}, locations: [] },
+      approved: false,
+      signal,
+    });
+    boxPreviews.set(cacheKey, report.pdf);
+    // Keep the last few previews only.
+    for (const key of boxPreviews.keys()) {
+      if (boxPreviews.size <= 40) break;
+      boxPreviews.delete(key);
+    }
+    return pdfResponse(report.pdf);
+  } catch (error) {
+    if (error instanceof ConverterUnavailable) throw new ApiError(503, "CONVERTER_UNAVAILABLE", error.message);
+    if (error instanceof ConversionCancelled) throw new ApiError(409, "PREVIEW_CANCELLED", "The preview was cancelled");
+    throw error;
+  }
+}
 
 /** The boxes of the checkbox question a box belongs to (boxes bound to the same answer). */
 function boxGroup(version: Row, anchor: string | null | undefined): Slot[] {
@@ -167,7 +238,24 @@ async function findVersion(id: string | undefined): Promise<Row> {
     [id],
   );
   if (!rows[0]) throw ApiError.notFound("Template version not found");
-  return rows[0];
+  const row = rows[0];
+  const history = (row.layout_history as Row[] | null) ?? [];
+  Object.defineProperty(row, "layout_history", { value: history, enumerable: false });
+  row.undo_steps = history.length;
+  row.last_change = (history[0]?.note as string | undefined) ?? null;
+  return row;
+}
+
+const HISTORY_LIMIT = 30;
+
+/**
+ * The version's page as it is now, put first in its undo history, with the other columns
+ * the change touches (slots, bindings, definition), so «تراجع» can bring it back.
+ */
+function historyWith(version: Row, note: string, keep: ("slots" | "bindings" | "definition")[]): string {
+  const entry: Row = { note, at: new Date().toISOString(), layout_path: version.layout_path, layout_sha256: version.layout_sha256 };
+  for (const key of keep) entry[key] = version[key];
+  return JSON.stringify([entry, ...((version.layout_history as Row[]) ?? [])].slice(0, HISTORY_LIMIT));
 }
 
 function assertDraft(version: Row): void {
@@ -977,8 +1065,17 @@ export function registerTemplateRoutes(router: Router): void {
       const layoutPath = await storeFile(`templates/layouts/${version.version_id}-${Date.now()}.docx`, bytes);
       const rows = await query(
         `UPDATE template_versions SET layout_path = $2, layout_sha256 = $3, slots = $4::text::jsonb, bindings = $5::text::jsonb,
-           definition = $6::text::jsonb, updated_at = now() WHERE version_id = $1 AND status = 'draft' RETURNING version_id`,
-        [version.version_id, layoutPath, await sha256(bytes), JSON.stringify(slots), JSON.stringify(bindings), JSON.stringify(definition)],
+           definition = $6::text::jsonb, layout_history = $7::text::jsonb, updated_at = now()
+         WHERE version_id = $1 AND status = 'draft' RETURNING version_id`,
+        [
+          version.version_id,
+          layoutPath,
+          await sha256(bytes),
+          JSON.stringify(slots),
+          JSON.stringify(bindings),
+          JSON.stringify(definition),
+          historyWith(version, op === "create" ? "إضافة نقطة" : op === "move" ? "نقل نقطة" : "حذف نقطة", ["slots", "bindings", "definition"]),
+        ],
       );
       if (!rows[0]) throw new ApiError(409, "TEMPLATE_VERSION_LOCKED", "This version is no longer a draft");
       await logTemplateEvent({
@@ -1044,9 +1141,9 @@ export function registerTemplateRoutes(router: Router): void {
       const bytes = pkg.save();
       const layoutPath = await storeFile(`templates/layouts/${version.version_id}-${Date.now()}.docx`, bytes);
       const rows = await query(
-        `UPDATE template_versions SET layout_path = $2, layout_sha256 = $3, slots = $4::text::jsonb, updated_at = now()
-           WHERE version_id = $1 AND status = 'draft' RETURNING version_id`,
-        [version.version_id, layoutPath, await sha256(bytes), JSON.stringify(slots)],
+        `UPDATE template_versions SET layout_path = $2, layout_sha256 = $3, slots = $4::text::jsonb, layout_history = $5::text::jsonb,
+           updated_at = now() WHERE version_id = $1 AND status = 'draft' RETURNING version_id`,
+        [version.version_id, layoutPath, await sha256(bytes), JSON.stringify(slots), historyWith(version, "تحريك مربعات الاختيار", ["slots"])],
       );
       if (!rows[0]) throw new ApiError(409, "TEMPLATE_VERSION_LOCKED", "This version is no longer a draft");
       await logTemplateEvent({
@@ -1074,52 +1171,216 @@ export function registerTemplateRoutes(router: Router): void {
       const cacheKey = `${version.version_id}:${String(version.updated_at)}:${group.map((slot) => slot.anchor).join(",")}`;
       const cached = boxPreviews.get(cacheKey);
       if (cached) return pdfResponse(cached);
-      let layout: Uint8Array;
+      const tick = (bindings: Binding[], answers: Record<string, unknown>) => {
+        const source = bindings.find((binding) => binding.anchor === group[0]!.anchor && binding.action === "check")?.source?.replace(/^answers\./, "");
+        if (source) answers[source] = group.map((slot) => slot.option ?? "");
+      };
+      return excerptPreview(version, cacheKey, (bytes) => excerptLayout(bytes, group.map((slot) => slot.anchor)), context.req.signal, tick);
+    }),
+  );
+
+  /** The exact words of one paragraph, for typing in it from the mapper. */
+  router.get(
+    "/forms/admin/versions/:version_id/paragraph",
+    withPermission(MANAGE, async (context) => {
+      const version = await findVersion(context.params.version_id);
+      if (version.layout_mode !== "docx" || !version.layout_path) throw ApiError.badRequest("This version has no client layout");
+      const part = requiredText(context.url.searchParams.get("part"), "part", 80);
+      const paragraph = Number(context.url.searchParams.get("paragraph"));
+      if (!Number.isInteger(paragraph) || paragraph < 0) throw ApiError.badRequest("Choose a line on the page");
       try {
-        layout = excerptLayout(await loadFile(version.layout_path as string), group.map((slot) => slot.anchor));
+        return ok({ text: paragraphText(DocxPackage.open(await loadFile(version.layout_path as string)), { part, paragraph }) });
       } catch (error) {
         if (error instanceof PlaceError) throw new ApiError(400, "PLACE_NOT_ALLOWED", error.message);
         throw error;
       }
-      // Only what is left in the excerpt is filled, so no appendix pages are added.
-      const present = new Set(
-        descendants(DocxPackage.open(layout).xml("word/document.xml").documentElement as El, "bookmarkStart").map((mark) => attr(mark, "name") ?? ""),
-      );
-      const bindings = ((version.bindings as Binding[]) ?? []).filter((binding) => present.has(binding.anchor));
-      const used = new Set(bindings.map((binding) => binding.source?.replace(/^answers\./, "")));
-      const full = version.definition as TemplateDefinition;
-      const definition: TemplateDefinition = {
-        ...full,
-        sections: full.sections.map((section) => ({ ...section, fields: section.fields.filter((field) => used.has(field.key)) })),
-      };
-      const answers = sampleAnswers(definition);
-      const source = bindings.find((binding) => binding.anchor === group[0]!.anchor && binding.action === "check")?.source?.replace(/^answers\./, "");
-      if (source) answers[source] = group.map((slot) => slot.option ?? "");
+    }),
+  );
+
+  /** A picture's kind and size, for the picture tools. */
+  router.get(
+    "/forms/admin/versions/:version_id/picture",
+    withPermission(MANAGE, async (context) => {
+      const version = await findVersion(context.params.version_id);
+      if (version.layout_mode !== "docx" || !version.layout_path) throw ApiError.badRequest("This version has no client layout");
       try {
-        const report = await renderDocxReport({
-          layout,
-          bindings,
-          slots: (version.slots as Slot[] | null) ?? null,
-          definition,
-          answers,
-          context: SAMPLE_CONTEXT,
-          images: {},
-          evidence: { photos: {}, locations: [] },
-          approved: false,
-          signal: context.req.signal,
-        });
-        boxPreviews.set(cacheKey, report.pdf);
-        // Keep the last few previews only.
-        for (const key of boxPreviews.keys()) {
-          if (boxPreviews.size <= 40) break;
-          boxPreviews.delete(key);
-        }
-        return pdfResponse(report.pdf);
+        return ok({ picture: pictureInfo(DocxPackage.open(await loadFile(version.layout_path as string)), requiredText(context.url.searchParams.get("id"), "id", 120)) });
       } catch (error) {
-        if (error instanceof ConverterUnavailable) throw new ApiError(503, "CONVERTER_UNAVAILABLE", error.message);
-        if (error instanceof ConversionCancelled) throw new ApiError(409, "PREVIEW_CANCELLED", "The preview was cancelled");
+        if (error instanceof PlaceError) throw new ApiError(400, "PLACE_NOT_ALLOWED", error.message);
         throw error;
       }
+    }),
+  );
+
+  /** How a picture prints: a PDF of only the rows around it. */
+  router.get(
+    "/forms/admin/versions/:version_id/picture/preview",
+    withPermission(MANAGE, async (context) => {
+      const version = await findVersion(context.params.version_id);
+      if (version.layout_mode !== "docx" || !version.layout_path) throw ApiError.badRequest("This version has no client layout");
+      const id = requiredText(context.url.searchParams.get("id"), "id", 120);
+      const [part, index] = id.split("|");
+      return excerptPreview(
+        version,
+        `${version.version_id}:${String(version.updated_at)}:picture:${id}`,
+        (bytes) => excerptLayout(bytes, [], (pkg) => (part ? [picturesOf(pkg, part)[Number(index)]].filter((item): item is El => Boolean(item)) : [])),
+        context.req.signal,
+      );
+    }),
+  );
+
+  /**
+   * Word-like editing of the client's page: type, delete or replace words, change their size
+   * or weight, and move, resize or delete pictures. Drafts only; every change can be undone.
+   */
+  router.post(
+    "/forms/admin/versions/:version_id/edits",
+    withPermission(MANAGE, async (context, auth) => {
+      const version = await findVersion(context.params.version_id);
+      assertDraft(version);
+      if (version.layout_mode !== "docx" || !version.layout_path) throw ApiError.badRequest("This version has no client layout");
+      const body = await readJson(context.req);
+      const op = String(body.op ?? "");
+      const pkg = DocxPackage.open(await loadFile(version.layout_path as string));
+      let slots = (version.slots as Slot[]) ?? [];
+      let slotsChanged = false;
+      const where = (): PlaceTarget => {
+        const paragraph = Number(body.paragraph);
+        const offset = Number(body.offset);
+        if (!Number.isInteger(paragraph) || paragraph < 0 || !Number.isInteger(offset) || offset < 0) {
+          throw ApiError.badRequest("Choose a spot on the page");
+        }
+        return { part: requiredText(body.part, "part", 80), paragraph, offset };
+      };
+      const end = (target: PlaceTarget) => {
+        const value = body.end === undefined || body.end === null ? target.offset : Number(body.end);
+        if (!Number.isInteger(value) || value < target.offset) throw ApiError.badRequest("The selection must not end before it starts");
+        return value;
+      };
+      const picture = () => requiredText(body.picture, "picture", 120);
+      const millimetres = (value: unknown) => {
+        const number = Math.round(Number(value ?? 0) * 10) / 10;
+        if (!Number.isFinite(number) || Math.abs(number) > 100) throw ApiError.badRequest("Move by at most 100 mm at a time");
+        return number;
+      };
+      let note: string;
+      try {
+        switch (op) {
+          case "text": {
+            const target = where();
+            if (typeof body.text !== "string") throw ApiError.badRequest("text must be a string");
+            // Several changes in one line (typing in two places): applied from the end of the
+            // line backwards, so each offset still points at the line as it was.
+            const raw = Array.isArray(body.changes) ? (body.changes as Row[]) : [{ offset: target.offset, end: end(target), text: body.text }];
+            if (!raw.length || raw.length > 40) throw ApiError.badRequest("Send between 1 and 40 changes");
+            const changes = raw.map((change) => {
+              const offset = Number(change.offset);
+              const stop = Number(change.end);
+              if (!Number.isInteger(offset) || !Number.isInteger(stop) || offset < 0 || stop < offset || typeof change.text !== "string") {
+                throw ApiError.badRequest("Each change needs an offset, an end and a text");
+              }
+              return { offset, end: stop, text: (change.text as string).replace(/\r\n?/g, "\n") };
+            });
+            changes.sort((a, b) => b.offset - a.offset);
+            for (let index = 1; index < changes.length; index += 1) {
+              if (changes[index]!.end > changes[index - 1]!.offset) throw ApiError.badRequest("The changes overlap");
+            }
+            for (const change of changes) editText(pkg, { ...target, offset: change.offset }, change.end, change.text);
+            note = changes.some((change) => change.text) ? "تعديل نص" : "حذف نص";
+            break;
+          }
+          case "style": {
+            const target = where();
+            const flag = (value: unknown) => (typeof value === "boolean" ? value : undefined);
+            const size = body.size === undefined || body.size === null ? undefined : Number(body.size);
+            styleText(pkg, target, end(target), { size, bold: flag(body.bold), italic: flag(body.italic), underline: flag(body.underline) });
+            note = size !== undefined ? "تغيير حجم الخط" : "تنسيق نص";
+            break;
+          }
+          case "picture.move": {
+            const target = where();
+            const moved = movePicture(pkg, picture(), target);
+            if (moved.length) {
+              slots = slots.map((slot) => (moved.includes(slot.anchor) ? { ...slot, part: target.part } : slot));
+              slotsChanged = true;
+            }
+            note = "نقل صورة";
+            break;
+          }
+          case "picture.nudge":
+            nudgePicture(pkg, picture(), millimetres(body.dx), millimetres(body.dy));
+            note = "تحريك صورة";
+            break;
+          case "picture.resize": {
+            const factor = Number(body.factor);
+            if (!Number.isFinite(factor)) throw ApiError.badRequest("factor must be a number");
+            resizePicture(pkg, picture(), factor);
+            note = "تغيير حجم صورة";
+            break;
+          }
+          case "picture.delete":
+            deletePicture(pkg, picture());
+            note = "حذف صورة";
+            break;
+          default:
+            throw ApiError.badRequest("op must be text, style, picture.move, picture.nudge, picture.resize or picture.delete");
+        }
+      } catch (error) {
+        if (error instanceof PlaceError) throw new ApiError(400, "EDIT_NOT_ALLOWED", error.message);
+        throw error;
+      }
+      const bytes = pkg.save();
+      const layoutPath = await storeFile(`templates/layouts/${version.version_id}-${Date.now()}.docx`, bytes);
+      const rows = await query(
+        `UPDATE template_versions SET layout_path = $2, layout_sha256 = $3, slots = $4::text::jsonb, layout_history = $5::text::jsonb,
+           updated_at = now() WHERE version_id = $1 AND status = 'draft' RETURNING version_id`,
+        [version.version_id, layoutPath, await sha256(bytes), JSON.stringify(slots), historyWith(version, note, slotsChanged ? ["slots"] : [])],
+      );
+      if (!rows[0]) throw new ApiError(409, "TEMPLATE_VERSION_LOCKED", "This version is no longer a draft");
+      await logTemplateEvent({
+        type: "version.edited",
+        template_id: version.template_id as string,
+        version_id: version.version_id as string,
+        actor_id: auth.user.user_id,
+        note,
+        metadata: { op, part: body.part ?? null, paragraph: body.paragraph ?? null, picture: body.picture ?? null },
+      });
+      return ok({ undo_steps: Math.min(HISTORY_LIMIT, ((version.layout_history as Row[]) ?? []).length + 1) });
+    }),
+  );
+
+  /** Takes back the last change to the page (an edit, a moved point or moved boxes). */
+  router.post(
+    "/forms/admin/versions/:version_id/undo",
+    withPermission(MANAGE, async (context, auth) => {
+      const version = await findVersion(context.params.version_id);
+      assertDraft(version);
+      const [entry, ...rest] = (version.layout_history as Row[]) ?? [];
+      if (!entry) throw new ApiError(409, "NOTHING_TO_UNDO", "There is nothing to undo");
+      const rows = await query(
+        `UPDATE template_versions SET layout_path = $2, layout_sha256 = $3, slots = $4::text::jsonb, bindings = $5::text::jsonb,
+           definition = $6::text::jsonb, layout_history = $7::text::jsonb, updated_at = now()
+         WHERE version_id = $1 AND status = 'draft' RETURNING version_id`,
+        [
+          version.version_id,
+          entry.layout_path,
+          entry.layout_sha256,
+          JSON.stringify(entry.slots ?? version.slots),
+          JSON.stringify(entry.bindings ?? version.bindings),
+          JSON.stringify(entry.definition ?? version.definition),
+          JSON.stringify(rest),
+        ],
+      );
+      if (!rows[0]) throw new ApiError(409, "TEMPLATE_VERSION_LOCKED", "This version is no longer a draft");
+      await logTemplateEvent({
+        type: "version.edited",
+        template_id: version.template_id as string,
+        version_id: version.version_id as string,
+        actor_id: auth.user.user_id,
+        note: `تراجع عن: ${String(entry.note ?? "تعديل")}`,
+        metadata: { undo: entry.note ?? null },
+      });
+      return ok({ undo_steps: rest.length, undone: entry.note ?? null });
     }),
   );
 

@@ -6,22 +6,60 @@
  */
 import { attr, child, children, descendants, DocxPackage, type El, local, NS, symText, textOf } from "./docx.ts";
 import { lengthOf, paragraphsOf } from "./edit.ts";
+import { picturesOf } from "./word.ts";
 
 const escape = (value: string) =>
   value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
 
 const EMU_PX = 9525;
+/** Screen pixels per typographic point on the mapper's page. */
+const PX_PER_PT = 1.25;
+const fontSize = (halfPoints: number) => `font-size:${Math.round((halfPoints / 2) * PX_PER_PT * 10) / 10}px`;
 
 export class LayoutHtml {
   private openSlots: string[] = [];
 
   /** Each paragraph's position in its part, as the server counts it when a point is dropped. */
   private readonly index = new Map<El, string>();
+  /** Each picture's id (part and order), as the server finds it when it is moved. */
+  private readonly pictures = new Map<El, string>();
+  /** Font sizes (half-points) of the document's styles, and its default size. */
+  private readonly styleSizes = new Map<string, number>();
+  private defaultSize = 22;
+  private paragraphStyle = "";
 
   constructor(private readonly pkg: DocxPackage) {
     for (const part of pkg.textParts()) {
       paragraphsOf(pkg, part).forEach((paragraph, position) => this.index.set(paragraph, `${part}|${position}`));
+      picturesOf(pkg, part).forEach((picture, position) => this.pictures.set(picture, `${part}|${position}`));
     }
+    this.readStyles();
+  }
+
+  private readStyles(): void {
+    if (!this.pkg.has("word/styles.xml")) return;
+    const root = this.pkg.xml("word/styles.xml").documentElement as El;
+    const sizeIn = (holder: El | undefined) => {
+      const rPr = holder ? child(holder, "rPr") : undefined;
+      const sz = rPr ? child(rPr, "sz") : undefined;
+      return sz ? Number(attr(sz, "val")) || undefined : undefined;
+    };
+    const defaults = child(root, "docDefaults");
+    const base = defaults ? sizeIn(child(defaults, "rPrDefault")) : undefined;
+    if (base) this.defaultSize = base;
+    const styles = children(root, "style");
+    const byId = new Map(styles.map((style) => [attr(style, "styleId") ?? "", style]));
+    const resolve = (id: string, depth = 0): number | undefined => {
+      const style = byId.get(id);
+      if (!style || depth > 10) return undefined;
+      return sizeIn(style) ?? resolve(attr(child(style, "basedOn"), "val") ?? "", depth + 1);
+    };
+    for (const id of byId.keys()) {
+      const size = resolve(id);
+      if (size) this.styleSizes.set(id, size);
+    }
+    const normal = styles.find((style) => attr(style, "type") === "paragraph" && attr(style, "default") === "1");
+    if (normal) this.paragraphStyle = attr(normal, "styleId") ?? "";
   }
 
   render(): string {
@@ -65,7 +103,9 @@ export class LayoutHtml {
       .join("");
     const where = this.index.get(paragraph);
     const target = where ? ` data-p="${where}" data-len="${textOf(paragraph).length}"` : "";
-    return `${pageBreak}<p style="text-align:${align}"${target}>${inner || "&#8203;"}</p>${boxes}`;
+    const styleId = attr(pPr ? child(pPr, "pStyle") : undefined, "val") ?? this.paragraphStyle;
+    const size = this.styleSizes.get(styleId) ?? this.styleSizes.get(this.paragraphStyle) ?? this.defaultSize;
+    return `${pageBreak}<p style="text-align:${align};${fontSize(size)}"${target}>${inner || "&#8203;"}</p>${boxes}`;
   }
 
   private inFallback(node: Node): boolean {
@@ -125,8 +165,14 @@ export class LayoutHtml {
 
   private run(run: El, part: string): string {
     const rPr = child(run, "rPr");
-    const bold = rPr && (child(rPr, "b") || child(rPr, "bCs"));
+    const on = (name: string) => {
+      const flag = rPr ? child(rPr, name) : undefined;
+      return Boolean(flag) && !["0", "false", "off"].includes(attr(flag, "val") ?? "");
+    };
+    const bold = on("b") || on("bCs");
+    const italic = on("i") || on("iCs");
     const underline = rPr && child(rPr, "u") && attr(child(rPr, "u"), "val") !== "none";
+    const explicit = Number(attr(rPr ? child(rPr, "sz") : undefined, "val")) || this.styleSizes.get(attr(rPr ? child(rPr, "rStyle") : undefined, "val") ?? "");
     const color = attr(rPr ? child(rPr, "color") : undefined, "val");
     const highlight = attr(rPr ? child(rPr, "highlight") : undefined, "val");
     let html = "";
@@ -141,7 +187,9 @@ export class LayoutHtml {
     if (!html) return "";
     const style = [
       bold ? "font-weight:700" : "",
+      italic ? "font-style:italic" : "",
       underline ? "text-decoration:underline" : "",
+      explicit ? fontSize(explicit) : "",
       color && color !== "auto" ? `color:#${color}` : "",
       highlight && highlight !== "none" ? `background:${highlight === "yellow" ? "#fff59d" : "#e8eef7"}` : "",
     ].filter(Boolean).join(";");
@@ -153,6 +201,9 @@ export class LayoutHtml {
     const blip = descendants(drawing, "blip", NS.a)[0] ?? descendants(drawing, "imagedata", NS.v)[0];
     const id = blip ? blip.getAttributeNS(NS.r, "embed") || blip.getAttributeNS(NS.r, "id") : "";
     const extent = descendants(drawing, "extent", NS.wp)[0];
+    const picture = descendants(drawing, "inline", NS.wp)[0] ?? descendants(drawing, "anchor", NS.wp)[0];
+    const pictureId = picture ? this.pictures.get(picture) : undefined;
+    const handle = pictureId ? ` class="doc-img" data-img="${pictureId}" data-float="${local(picture!) === "anchor" ? 1 : 0}" tabindex="0" role="button"` : "";
     const width = Math.min(Math.round(Number(extent?.getAttribute("cx") ?? 0) / EMU_PX) || 80, 620);
     const height = Math.min(Math.round(Number(extent?.getAttribute("cy") ?? 0) / EMU_PX) || 60, 700);
     if (id) {
@@ -160,9 +211,9 @@ export class LayoutHtml {
       const bytes = target ? this.pkg.bytes(target) : undefined;
       if (bytes && /\.(png|jpe?g|gif|webp)$/i.test(target ?? "")) {
         const type = /\.png$/i.test(target!) ? "png" : /\.gif$/i.test(target!) ? "gif" : /\.webp$/i.test(target!) ? "webp" : "jpeg";
-        return `<img alt="" src="data:image/${type};base64,${Buffer.from(bytes).toString("base64")}" style="width:${width}px;max-height:${height}px">`;
+        return `<img alt=""${handle} src="data:image/${type};base64,${Buffer.from(bytes).toString("base64")}" style="width:${width}px;max-height:${height}px">`;
       }
-      return `<span class="doc-image" style="width:${Math.min(width, 40)}px;height:${Math.min(height, 40)}px"></span>`;
+      return `<span${handle ? handle.replace('class="doc-img"', 'class="doc-image doc-img"') : ' class="doc-image"'} style="width:${Math.min(width, 40)}px;height:${Math.min(height, 40)}px"></span>`;
     }
     if (descendants(drawing, "txbxContent").some((box) => textOf(box).trim())) return "";
     if (width < 45 && height < 45) return '<span class="box">☐</span>';
