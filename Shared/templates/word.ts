@@ -245,7 +245,10 @@ function inFallback(node: Node): boolean {
   return false;
 }
 
-/** Pictures of a part in document order: the drawings (inline or floating) that show an image. */
+/**
+ * Pictures and text boxes of a part in document order: the drawings (inline or floating)
+ * that show an image or hold a frame of text. Checkbox squares are not among them.
+ */
 export function picturesOf(pkg: DocxPackage, part: string): El[] {
   const out: El[] = [];
   const walk = (node: Node) => {
@@ -253,7 +256,7 @@ export function picturesOf(pkg: DocxPackage, part: string): El[] {
     const el = node as El;
     if (el.namespaceURI === NS.mc && local(el) === "Fallback") return;
     if (el.namespaceURI === NS.wp && (local(el) === "inline" || local(el) === "anchor")) {
-      if (descendants(el, "blip", NS.a).length) out.push(el);
+      if (descendants(el, "blip", NS.a).length || descendants(el, "txbx", NS.wps).length) out.push(el);
       return;
     }
     for (let next = el.firstChild; next; next = next.nextSibling) walk(next);
@@ -264,6 +267,8 @@ export function picturesOf(pkg: DocxPackage, part: string): El[] {
 
 export interface PictureInfo {
   id: string;
+  /** A picture, or a text box (a frame that holds text, often an empty field frame). */
+  kind: "picture" | "textbox";
   floating: boolean;
   widthMm: number;
   heightMm: number;
@@ -306,6 +311,7 @@ export function pictureInfo(pkg: DocxPackage, id: string): PictureInfo {
   const { run } = holderOf(picture);
   return {
     id,
+    kind: descendants(picture, "blip", NS.a).length ? "picture" : "textbox",
     floating: local(picture) === "anchor",
     widthMm: Math.round((Number(extent?.getAttribute("cx") ?? 0) / EMU_PER_MM) * 10) / 10,
     heightMm: Math.round((Number(extent?.getAttribute("cy") ?? 0) / EMU_PER_MM) * 10) / 10,
@@ -434,11 +440,19 @@ function detachPicture(pkg: DocxPackage, id: string): { nodes: El[]; names: stri
 }
 
 /** Removes a picture. A photo, logo or stamp place stays (as an empty point) with its binding. */
-export function deletePicture(pkg: DocxPackage, id: string): void {
+/**
+ * Removes a picture or a text box. A photo, logo or stamp place around it stays (as an
+ * empty point). Returns the places that were inside a text box and went with it.
+ */
+export function deletePicture(pkg: DocxPackage, id: string): string[] {
   const { picture } = pictureById(pkg, id);
   const { run, item } = holderOf(picture);
+  const inside = descendants(item, "bookmarkStart")
+    .map((mark) => attr(mark, "name") ?? "")
+    .filter((name) => name.startsWith("gp_"));
   remove(item);
   if (!children(run).some((node) => local(node) !== "rPr")) remove(run);
+  return inside;
 }
 
 /**

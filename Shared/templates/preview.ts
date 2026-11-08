@@ -99,7 +99,14 @@ export class LayoutHtml {
     const inner = this.inline(paragraph, part, true);
     const boxes = descendants(paragraph, "txbxContent")
       .filter((box) => !box.parentNode || !this.inFallback(box))
-      .map((box) => `<div class="doc-textbox">${this.blocks(box, part) || "&nbsp;"}</div>`)
+      .map((box) => {
+        // A text box can be chosen, moved and deleted in page editing like a picture.
+        let frame: Node | null = box.parentNode;
+        while (frame && !(frame.nodeType === 1 && (frame as El).namespaceURI === NS.wp && ["inline", "anchor"].includes(local(frame as El)))) frame = frame.parentNode;
+        const id = frame ? this.pictures.get(frame as El) : undefined;
+        const handle = id ? ` data-img="${id}" data-float="${local(frame as El) === "anchor" ? 1 : 0}" data-kind="textbox" tabindex="0"` : "";
+        return `<div class="doc-textbox"${handle}>${this.blocks(box, part) || "&nbsp;"}</div>`;
+      })
       .join("");
     const where = this.index.get(paragraph);
     const target = where ? ` data-p="${where}" data-len="${textOf(paragraph).length}"` : "";

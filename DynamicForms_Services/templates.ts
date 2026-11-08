@@ -1249,6 +1249,7 @@ export function registerTemplateRoutes(router: Router): void {
       const op = String(body.op ?? "");
       const pkg = DocxPackage.open(await loadFile(version.layout_path as string));
       let slots = (version.slots as Slot[]) ?? [];
+      let bindings = (version.bindings as Binding[]) ?? [];
       let slotsChanged = false;
       const where = (): PlaceTarget => {
         const paragraph = Number(body.paragraph);
@@ -1324,10 +1325,19 @@ export function registerTemplateRoutes(router: Router): void {
             note = "تغيير حجم صورة";
             break;
           }
-          case "picture.delete":
-            deletePicture(pkg, picture());
-            note = "حذف صورة";
+          case "picture.delete": {
+            const id = picture();
+            const kind = pictureInfo(pkg, id).kind;
+            // Places inside a deleted text box go with it, and nothing stays bound to them.
+            const gone = deletePicture(pkg, id);
+            if (gone.length) {
+              slots = slots.filter((slot) => !gone.includes(slot.anchor));
+              bindings = bindings.filter((binding) => !gone.includes(binding.anchor));
+              slotsChanged = true;
+            }
+            note = kind === "textbox" ? "حذف مربع نص" : "حذف صورة";
             break;
+          }
           default:
             throw ApiError.badRequest("op must be text, style, picture.move, picture.nudge, picture.resize or picture.delete");
         }
@@ -1338,9 +1348,16 @@ export function registerTemplateRoutes(router: Router): void {
       const bytes = pkg.save();
       const layoutPath = await storeFile(`templates/layouts/${version.version_id}-${Date.now()}.docx`, bytes);
       const rows = await query(
-        `UPDATE template_versions SET layout_path = $2, layout_sha256 = $3, slots = $4::text::jsonb, layout_history = $5::text::jsonb,
-           updated_at = now() WHERE version_id = $1 AND status = 'draft' RETURNING version_id`,
-        [version.version_id, layoutPath, await sha256(bytes), JSON.stringify(slots), historyWith(version, note, slotsChanged ? ["slots"] : [])],
+        `UPDATE template_versions SET layout_path = $2, layout_sha256 = $3, slots = $4::text::jsonb, bindings = $5::text::jsonb,
+           layout_history = $6::text::jsonb, updated_at = now() WHERE version_id = $1 AND status = 'draft' RETURNING version_id`,
+        [
+          version.version_id,
+          layoutPath,
+          await sha256(bytes),
+          JSON.stringify(slots),
+          JSON.stringify(bindings),
+          historyWith(version, note, slotsChanged ? ["slots", "bindings"] : []),
+        ],
       );
       if (!rows[0]) throw new ApiError(409, "TEMPLATE_VERSION_LOCKED", "This version is no longer a draft");
       await logTemplateEvent({

@@ -198,3 +198,28 @@ describe("pictures", () => {
     expect(descendants(saved.xml(part).documentElement as El, "bookmarkStart").length).toBe(marks);
   });
 });
+
+describe("text boxes", () => {
+  // Mogo's work form has an empty frame under «ماكينة تصوير … كاميرات مراقبة».
+  const mogoWork = load("Mogo Company", "استعلام عمل", "موجو -عمل.docx");
+
+  test("an empty text box can be chosen on the page and deleted, and the rest still prints", () => {
+    const pkg = DocxPackage.open(mogoWork.docx);
+    const html = layoutHtml(mogoWork.docx);
+    const frames = [...html.matchAll(/class="doc-textbox" data-img="([^"]+)"/g)].map((match) => match[1]!);
+    expect(frames.length).toBeGreaterThan(0);
+    const near = html.indexOf("طفايات حريق");
+    const id = [...html.matchAll(/class="doc-textbox" data-img="([^"]+)"/g)].find((match) => match.index! > near)![1]!;
+    expect(pictureInfo(pkg, id).kind).toBe("textbox");
+    const before = textOf(pkg.xml(PART).documentElement as El);
+    const count = picturesOf(pkg, PART).length;
+    const gone = deletePicture(pkg, id);
+    const saved = DocxPackage.open(pkg.save());
+    expect(picturesOf(saved, PART).length).toBe(count - 1);
+    expect(textOf(saved.xml(PART).documentElement as El)).toBe(before);
+    const bindings = mogoWork.bindings.filter((binding) => !gone.includes(binding.anchor));
+    expect(() =>
+      renderTemplate(saved.save(), bindings, { definition: mogoWork.definition, answers: {}, caseValues: {}, images: {}, evidence: { photos: {}, locations: [] } }),
+    ).not.toThrow();
+  });
+});
