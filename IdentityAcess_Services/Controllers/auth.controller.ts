@@ -26,6 +26,15 @@ import {
   startExistingEmployeeSignup,
 } from "../Services/auth.service.ts";
 import { extractBearerToken } from "../Utils/jwt.ts";
+import { deviceMetadata } from "../Services/auth.service.ts";
+import {
+  assertGoogleUnused,
+  googleConfigured,
+  type GoogleIdentity,
+  linkGoogle,
+  loginWithGoogle,
+  verifyGoogleToken,
+} from "../Services/google.service.ts";
 import { consumeRateLimit, RATE_LIMITS } from "../MIddlewares/rateLimit.middleware.ts";
 import type { AuthContext } from "../MIddlewares/auth.middleware.ts";
 
@@ -56,6 +65,37 @@ export async function loginController(context: RequestContext): Promise<Response
   return ok(result);
 }
 
+/** Sign in with Google; 404 GOOGLE_ACCOUNT_NOT_FOUND carries the name and email for sign-up. */
+export async function googleLoginController(context: RequestContext): Promise<Response> {
+  const body = await readJson(context.req);
+  const result = await loginWithGoogle(
+    body.id_token,
+    deviceMetadata({
+      deviceId: optionalDeviceId(body),
+      deviceName: optionalDeviceName(body),
+      platform: devicePlatform(body),
+      context,
+    }),
+    context,
+  );
+  return ok(result);
+}
+
+/** Whether the app should show "Sign in with Google". */
+export function googleStatusController(): Response {
+  return ok({ enabled: googleConfigured() });
+}
+
+/** A sign-up may carry a Google ID token: its verified email is used and the account is linked. */
+async function googleForSignup(form: FormData): Promise<GoogleIdentity | null> {
+  const token = form.get("google_id_token");
+  if (typeof token !== "string" || !token) return null;
+  const identity = await verifyGoogleToken(token);
+  await assertGoogleUnused(identity);
+  form.set("email", identity.email);
+  return identity;
+}
+
 export async function signupExistingStartController(
   context: RequestContext,
 ): Promise<Response> {
@@ -79,13 +119,17 @@ export async function signupExistingCompleteController(
   }
 
   const form = await readFormData(context.req);
+  const google = await googleForSignup(form);
   const result = await completeExistingEmployeeSignup(signupToken, form, context);
+  if (google) await linkGoogle(result.user_id, google);
   return created(result);
 }
 
 export async function signupNewController(context: RequestContext): Promise<Response> {
   const form = await readFormData(context.req);
+  const google = await googleForSignup(form);
   const result = await signupNewInvestigator(form, context);
+  if (google) await linkGoogle(result.user_id, google);
   return created(result);
 }
 

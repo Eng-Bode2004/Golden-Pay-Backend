@@ -14,6 +14,7 @@ import {
   isFilled,
   missingEvidence,
   sectionVisible,
+  statementText,
   type TemplateDefinition,
   upgradeLegacy,
   evaluate,
@@ -122,7 +123,7 @@ export async function renderHtml(report: ReportData): Promise<string> {
       // A statement prints only when confirmed and backed by recorded evidence.
       if (value !== true) return "";
       if (missingEvidence(field, answers, report.evidence).length) return "";
-      return `<tr><td colspan="2" class="statement">✓ ${escape(field.statement ?? field.label)}</td></tr>`;
+      return `<tr><td colspan="2" class="statement">✓ ${escape(statementText(field, answers))}</td></tr>`;
     }
     if (field.type === "table") {
       const rows = Array.isArray(value) ? (value as Record<string, unknown>[]) : [];

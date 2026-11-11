@@ -32,6 +32,8 @@ import {
   isFilled,
   isRequired,
   missingEvidence,
+  statementBlanks,
+  statementText,
   type TemplateDefinition,
   visibleFields,
 } from "./definition.ts";
@@ -186,6 +188,10 @@ export class TemplateRenderer {
     if (this.data.preview === "labels") {
       if (source?.startsWith("case.")) return `«${source.slice(5)}»`;
       return field ? `«${field.label}»` : "";
+    }
+    if (field?.type === "attestation") {
+      const value = this.value(source);
+      return value === true || value === "true" ? statementText(field, this.data.answers) : "";
     }
     return formatValue(field, this.value(source));
   }
@@ -516,8 +522,9 @@ export class TemplateRenderer {
     const confirmed = value === true || value === "true" || value === "نعم";
     const gaps = confirmed ? missingEvidence(field, this.data.answers, this.data.evidence) : [];
     if (confirmed && !gaps.length) {
-      // Client sentence: keep it as written. A placed point: write the field's statement.
-      if (point) this.writeAt(mark, field.statement?.trim() || field.label);
+      // A placed point: write the statement. A client sentence: keep it as written, unless
+      // it has blanks the investigator filled; then it is replaced by the completed sentence.
+      if (point || statementBlanks(field.statement)) this.writeAt(mark, statementText(field, this.data.answers));
       return;
     }
     this.issues.push(
@@ -670,7 +677,7 @@ export class TemplateRenderer {
       }
       add(table);
     }
-    for (const field of statements) add(paragraph(`• ${field.statement ?? field.label}`));
+    for (const field of statements) add(paragraph(`• ${statementText(field, this.data.answers)}`));
     for (const field of extraPhotos) {
       add(paragraph(field.label, { bold: true, size: 24 }));
       const holder = paragraph("", { center: true });

@@ -66,7 +66,7 @@ const UPSTREAMS: { prefixes: string[]; url: string }[] = [
   },
   { prefixes: ["/investigations"], url: process.env.INVESTIGATIONS_SERVICE_URL ?? "http://127.0.0.1:4004" },
   {
-    prefixes: ["/headoffice", "/attendance", "/points", "/complaints"],
+    prefixes: ["/headoffice", "/attendance", "/points", "/complaints", "/app"],
     url: process.env.HEADOFFICE_SERVICE_URL ?? "http://127.0.0.1:4005",
   },
 ];
@@ -278,8 +278,9 @@ async function bootstrap(): Promise<void> {
     hostname: process.env.LISTEN_HOST ?? "0.0.0.0",
     port: env.port,
     development: !env.isProduction,
-    maxRequestBodySize:
-      env.maxUploadBytes * 2 + env.maxJsonBytes + 1024 * 1024,
+    // App updates (APKs up to 200 MB) pass through to head office; every other route still
+    // checks its own, much smaller, limit.
+    maxRequestBodySize: Math.max(env.maxUploadBytes * 2 + env.maxJsonBytes + 1024 * 1024, 210 * 1024 * 1024),
     // Report previews and PDFs are built while the request waits (often more than Bun's
     // default 10 seconds); 255 s is Bun's maximum.
     idleTimeout: 255,

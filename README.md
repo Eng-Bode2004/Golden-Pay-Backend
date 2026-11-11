@@ -324,3 +324,31 @@ answers; the domain services then start on internal ports 4002–4005. It proxie
   Set `STORAGE_*` (or the same names with `S3_`) so files go to the bucket, and
   `CORS_ORIGINS` to the dashboards' addresses.
 - Never commit `.env`; the platform's environment settings hold the secrets.
+
+## Statements with blanks
+
+A statement (`attestation` field) may contain blanks: runs of dots (`....`, `……`),
+underscores, or empty brackets `( )`. The investigator types into each blank in the app;
+the words are saved as `answers["<key>__blanks"]` (a list, one entry per blank). A
+confirmed statement must have every blank filled, and every report prints the completed
+sentence (`statementText` in `Shared/templates/definition.ts`). Old forms whose pre-filled
+text is a declaration with blanks ("أقر أنا …… بأنه …") are upgraded to such statements.
+
+## Sign in with Google
+
+`POST /auth/google { id_token }` checks the token with Google (`oauth2.googleapis.com/tokeninfo`)
+and accepts it only when its audience is one of `GOOGLE_CLIENT_IDS` (the OAuth *web* client
+ID) and its email is verified. It signs in the account linked to that Google ID
+(`users.google_sub`), or the account with the same email (and links it). With no account it
+answers `404 GOOGLE_ACCOUNT_NOT_FOUND` with the name and email, and the app opens sign-up
+pre-filled; both sign-up endpoints accept `google_id_token` to link the new account. Status,
+MFA and audit rules are the same as password sign-in. `GET /auth/google/status` tells the app
+whether to show the button. Empty `GOOGLE_CLIENT_IDS` turns the feature off.
+
+## App updates
+
+Head office uploads each APK (Head office → تحديثات التطبيق). `GET /app/version?platform=android&code=N`
+(public) returns the newest active release and whether it is newer and mandatory;
+`GET /app/releases/:id/apk` serves the file. APKs are kept in the same storage as other
+files (cloud bucket in production) and may be up to 200 MB, so the Identity API and the
+internal services accept request bodies up to 210 MB; every other route keeps its own limit.

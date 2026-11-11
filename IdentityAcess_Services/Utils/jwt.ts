@@ -16,7 +16,7 @@ export interface JwtClaims {
 export interface AccessTokenClaims extends JwtClaims {
   typ: "access";
   sid: string;
-  amr: "password" | "biometric";
+  amr: "password" | "biometric" | "google";
 }
 
 export interface SignupTokenClaims extends JwtClaims {
@@ -125,7 +125,7 @@ function decodeJwt(token: string): StoredClaims {
 export function signAccessToken(input: {
   user_id: string;
   session_id: string;
-  auth_method: "password" | "biometric";
+  auth_method: "password" | "biometric" | "google";
 }): string {
   return issueJwt(
     {
@@ -160,7 +160,7 @@ export function verifyAccessToken(token: string): AccessTokenClaims {
   if (
     payload.typ !== "access" ||
     typeof payload.sid !== "string" ||
-    !["password", "biometric"].includes(String(payload.amr))
+    !["password", "biometric", "google"].includes(String(payload.amr))
   ) {
     throw ApiError.unauthorized("Invalid or expired token");
   }

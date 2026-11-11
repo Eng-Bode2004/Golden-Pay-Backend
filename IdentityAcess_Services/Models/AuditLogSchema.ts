@@ -1,6 +1,6 @@
 import { SqlModel, type SqlDocument } from "./SqlModel.ts";
 const AUDIT_EVENTS = [
-  "auth.login.password", "auth.login.biometric", "auth.login.failed", "auth.refresh",
+  "auth.login.password", "auth.login.biometric", "auth.login.google", "auth.login.failed", "auth.refresh",
   "auth.refresh.reuse_detected", "auth.refresh.retry", "auth.logout", "auth.password.changed", "profile.updated",
   "signup.existing.started", "signup.existing.completed", "signup.new.completed", "account.approved",
   "account.rejected", "account.suspended", "account.reactivated", "biometric.registered",
@@ -9,7 +9,7 @@ const AUDIT_EVENTS = [
   "admin.invited", "admin.invite.resent", "admin.invite.revoked",
   "headoffice.settings.updated", "headoffice.points.given", "headoffice.points.revoked", "headoffice.salary.updated",
   "headoffice.payroll.adjusted", "headoffice.payroll.adjustment_removed", "headoffice.payroll.paid",
-  "headoffice.payroll.payment_undone", "headoffice.expense.created", "headoffice.expense.removed", "headoffice.complaint.status",
+  "headoffice.payroll.payment_undone", "headoffice.expense.created", "headoffice.expense.removed", "headoffice.complaint.status", "headoffice.app_release.published", "headoffice.app_release.changed", "headoffice.app_release.removed",
   "investigation.created", "investigation.claimed", "investigation.submitted", "investigation.approved",
   "investigation.returned", "investigation.cancelled", "pricing.updated", "form.updated",
   "template.file_uploaded", "template.version_drafted", "template.updated", "template.returned",

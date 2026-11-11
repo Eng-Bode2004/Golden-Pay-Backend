@@ -57,7 +57,7 @@ export interface AuthenticatedUser {
   user: User;
   access: UserAccess;
   sessionId: string;
-  authMethod: "password" | "biometric";
+  authMethod: "password" | "biometric" | "google";
 }
 
 export async function findActiveUser(userId: string): Promise<User | null> {

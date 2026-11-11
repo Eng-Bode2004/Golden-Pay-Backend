@@ -110,3 +110,20 @@ CREATE TABLE IF NOT EXISTS complaint_messages (
   body text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- Mobile app updates uploaded by head office; the app installs the highest active version.
+CREATE TABLE IF NOT EXISTS app_releases (
+  release_id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  platform text NOT NULL DEFAULT 'android',
+  version_name text NOT NULL,
+  version_code bigint NOT NULL,
+  notes text,
+  mandatory boolean NOT NULL DEFAULT false,
+  size_bytes bigint NOT NULL,
+  sha256 text NOT NULL,
+  path text NOT NULL,
+  active boolean NOT NULL DEFAULT true,
+  created_by text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (platform, version_code)
+);

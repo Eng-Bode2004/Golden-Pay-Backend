@@ -9,6 +9,7 @@ import { logger } from "../IdentityAcess_Services/Utils/logger.ts";
 import { Router } from "../IdentityAcess_Services/Utils/router.ts";
 import { optionalNumber, optionalText, requiredText, startService } from "../Shared/service.ts";
 import { EXPENSE_CATEGORIES, expensesFor, monthResult, staffMonth } from "./money.ts";
+import { registerReleaseRoutes } from "./releases.ts";
 import {
   cairo,
   groupOf,
@@ -30,6 +31,7 @@ import {
 } from "./rules.ts";
 
 export const router = new Router();
+registerReleaseRoutes(router);
 const MANAGE = PERMISSIONS.HEADOFFICE_MANAGE;
 
 /**

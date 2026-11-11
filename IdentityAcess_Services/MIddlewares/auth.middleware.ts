@@ -12,7 +12,7 @@ export interface AuthContext {
   user: User;
   access: UserAccess;
   sessionId: string;
-  authMethod: "password" | "biometric";
+  authMethod: "password" | "biometric" | "google";
 }
 
 export async function authenticate(req: Request): Promise<AuthContext> {

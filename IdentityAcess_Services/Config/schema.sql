@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image text NOT NULL DEFAULT '';
+-- The Google account linked by "Sign in with Google" (its stable subject ID).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub text;
+CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_unique ON users(google_sub) WHERE google_sub IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS employee_records (
   "_id" text PRIMARY KEY DEFAULT gen_random_uuid()::text,

@@ -3,6 +3,8 @@ import { byIp, rateLimit, RATE_LIMITS } from "../MIddlewares/rateLimit.middlewar
 import { withAuth } from "../MIddlewares/auth.middleware.ts";
 import {
   changePasswordController,
+  googleLoginController,
+  googleStatusController,
   loginController,
   logoutAllController,
   logoutController,
@@ -24,6 +26,12 @@ export function registerAuthRoutes(router: Router): void {
     "/auth/login",
     rateLimit("auth.login.ip", RATE_LIMITS.loginByIp, byIp)(loginController),
   );
+
+  router.post(
+    "/auth/google",
+    rateLimit("auth.login.ip", RATE_LIMITS.loginByIp, byIp)(googleLoginController),
+  );
+  router.get("/auth/google/status", googleStatusController);
 
   router.post(
     "/auth/signup/existing/start",

@@ -174,7 +174,7 @@ export function assertAccountActive(user: User): void {
   }
 }
 
-function deviceMetadata(input: {
+export function deviceMetadata(input: {
   deviceId?: string;
   deviceName?: string;
   platform: "ios" | "android" | "web" | "unknown";

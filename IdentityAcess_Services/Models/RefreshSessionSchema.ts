@@ -3,7 +3,7 @@ export interface RefreshSession {
   session_id: string;
   user_id: string;
   refresh_token_hash: string;
-  auth_method: "password" | "biometric";
+  auth_method: "password" | "biometric" | "google";
   device_id?: string | null;
   device_name?: string | null;
   platform?: "ios" | "android" | "web" | "unknown";

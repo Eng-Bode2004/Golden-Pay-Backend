@@ -100,7 +100,7 @@ export async function startService(options: ServiceOptions): Promise<void> {
     const server = Bun.serve({
       hostname: process.env.INTERNAL_HOST ?? "127.0.0.1",
       port,
-      maxRequestBodySize: 32 * 1024 * 1024,
+      maxRequestBodySize: 210 * 1024 * 1024, // app update APKs
       idleTimeout: 255,
       fetch: handle,
     });

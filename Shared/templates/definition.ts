@@ -415,6 +415,18 @@ export function upgradeLegacy(sections: unknown): TemplateDefinition {
       title: section.title,
       fields: (Array.isArray(section.fields) ? section.fields : []).map((field: Record<string, unknown>) => {
         const { default: fallback, ...rest } = field;
+        // A pre-filled declaration with blanks ("أقر أنا …… بأنه…") becomes a statement the
+        // investigator completes in place and confirms, instead of an empty text box.
+        if (typeof fallback === "string" && isDeclaration(fallback)) {
+          return {
+            ...rest,
+            key: legacyKey(String(field.key)),
+            type: "attestation",
+            options: undefined,
+            statement: fallback.replace(/\s+/g, " ").trim(),
+            evidence: defaultEvidence(evidenceKindFor(fallback)),
+          };
+        }
         // Old seeds pre-filled some "we visited…" sentences; those become blank answers.
         const keep = typeof fallback === "string" && !claimsAction(fallback) && !["choice", "yesno"].includes(String(field.type));
         // A list question saved without options can only be answered as text.
@@ -430,6 +442,11 @@ export function upgradeLegacy(sections: unknown): TemplateDefinition {
     })),
   };
   return parseDefinition(definition);
+}
+
+/** "أقر / نقر / أتعهد …" with at least one blank to fill. */
+export function isDeclaration(text: string): boolean {
+  return /^\s*(أقر|اقر|إقرار|اقرار|نقر|أتعهد|اتعهد|أشهد|اشهد)/.test(text) && statementBlanks(text) > 0;
 }
 
 /** Legacy keys were sometimes camel or mixed case; v2 keys are lowercase. */
@@ -689,6 +706,14 @@ export function validateAnswers(definition: TemplateDefinition, answers: Answers
     if (field.type === "attestation") {
       const confirmed = value === true || value === "true" || value === "نعم";
       if (required && !confirmed) issues.push({ key: field.key, label: field.label, message: `«${field.label}» مطلوب` });
+      const blanks = statementBlanks(field.statement);
+      if (confirmed && blanks) {
+        const typed = answers[blanksKey(field.key)];
+        const filled = Array.isArray(typed) ? typed.filter((item) => String(item ?? "").trim()).length : 0;
+        if (filled < blanks) {
+          issues.push({ key: field.key, label: field.label, message: `أكمل الفراغات في «${field.label}» قبل تأكيده` });
+        }
+      }
       if (confirmed) {
         const gaps = missingEvidence(field, answers, context);
         if (gaps.length) {
@@ -721,6 +746,14 @@ export function cleanAnswers(definition: TemplateDefinition, answers: Answers): 
   const visible = new Map(visibleFields(definition, answers).map((field) => [field.key, field]));
   const output: Answers = {};
   for (const [key, value] of Object.entries(answers)) {
+    if (key.endsWith("__blanks")) {
+      // Words typed into a statement's blanks travel with that statement.
+      const owner = visible.get(key.slice(0, -"__blanks".length));
+      if (owner?.type === "attestation" && Array.isArray(value)) {
+        output[key] = value.slice(0, statementBlanks(owner.statement)).map((item) => String(item ?? "").trim().slice(0, 300));
+      }
+      continue;
+    }
     const field = visible.get(key);
     if (!field || IMAGE_TYPES.includes(field.type)) continue;
     if (field.type === "table") {
@@ -739,6 +772,43 @@ export function cleanAnswers(definition: TemplateDefinition, answers: Answers): 
     } else if (isFilled(value)) output[key] = typeof value === "string" ? value.trim() : value;
   }
   return output;
+}
+
+// ───────────────────────── statement blanks ─────────────────────────
+
+/**
+ * Gaps the investigator fills inside a statement: runs of dots (….. or ......),
+ * underscores, or empty brackets "( )". Each run is one blank, in reading order.
+ */
+const BLANK = /\.{3,}|…+|_{3,}|\(\s*\)/g;
+
+/** Answers key holding the words typed into a statement's blanks. */
+export const blanksKey = (key: string) => `${key}__blanks`;
+
+export function statementBlanks(statement: string | undefined): number {
+  return statement ? (statement.match(BLANK) ?? []).length : 0;
+}
+
+/** The sentence split around its blanks: text, blank, text, blank, … text. */
+export function statementParts(statement: string): string[] {
+  return statement.split(BLANK);
+}
+
+/** The statement with every filled blank replaced by what was typed; unfilled blanks stay. */
+export function fillStatement(statement: string, values: unknown): string {
+  const list = Array.isArray(values) ? values.map((item) => String(item ?? "").trim()) : [];
+  let index = 0;
+  return statement.replace(BLANK, (blank) => {
+    const value = list[index++];
+    if (!value) return blank;
+    return blank.startsWith("(") ? `(${value})` : value;
+  });
+}
+
+/** What a confirmed statement says, with the investigator's words in its blanks. */
+export function statementText(field: FieldDef, answers: Answers): string {
+  const sentence = field.statement?.trim() || field.label;
+  return fillStatement(sentence, answers[blanksKey(field.key)]);
 }
 
 // ───────────────────────── reusable blocks ─────────────────────────

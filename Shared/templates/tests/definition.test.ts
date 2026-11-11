@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  blanksKey,
   cleanAnswers,
+  fillStatement,
+  statementBlanks,
+  statementText,
   claimsAction,
   DefinitionError,
   evaluate,
@@ -148,4 +152,58 @@ describe("answer validation", () => {
     const cleaned = cleanAnswers(definition, { has_partners: "لا", partners: [{ name: "x" }], injected: "<b>", visited: "نعم" });
     expect(cleaned).toEqual({ has_partners: "لا", visited: true });
   });
+});
+
+describe("statements with blanks", () => {
+  const sentence = "أقر أنا مكتب استعلامات …………… بأنه تمت زيارة المقر بتاريخ ..../..../...... وأن النسبة (نسبته.....%) ( )";
+  const declaration = form([
+    {
+      key: "declare",
+      label: "إقرار المكتب",
+      type: "attestation",
+      statement: sentence,
+      evidence: { kind: "visit", requires: [{ type: "gps", max_meters: 500 }] },
+    },
+  ]);
+
+  test("each run of dots, ellipsis or empty brackets is one blank", () => {
+    expect(statementBlanks(sentence)).toBe(6);
+    expect(statementBlanks("تمت الزيارة")).toBe(0);
+  });
+
+  test("typed words replace the blanks in order; unfilled blanks keep their dots", () => {
+    expect(fillStatement("أقر أنا …… بتاريخ ....", ["جولدن باي"])).toBe("أقر أنا جولدن باي بتاريخ ....");
+    expect(fillStatement("الحالة ( )", ["متزوج"])).toBe("الحالة (متزوج)");
+  });
+
+  test("a confirmed statement needs every blank filled", () => {
+    expect(issuesOf(declaration, { declare: true }, onSite)).toContain("declare");
+    const all = ["جولدن باي", "10", "11", "2026", "30", "نعم"];
+    expect(issuesOf(declaration, { declare: true, [blanksKey("declare")]: all }, onSite)).toEqual([]);
+    expect(statementText(declaration.sections[0]!.fields[0]!, { [blanksKey("declare")]: all })).toBe(
+      "أقر أنا مكتب استعلامات جولدن باي بأنه تمت زيارة المقر بتاريخ 10/11/2026 وأن النسبة (نسبته30%) (نعم)",
+    );
+  });
+
+  test("the typed words are kept with their statement and trimmed to its blanks", () => {
+    const cleaned = cleanAnswers(declaration, { declare: true, [blanksKey("declare")]: [" أ ", "ب", "ج", "د", "هـ", "و", "زائد"], stray__blanks: ["x"] });
+    expect(cleaned[blanksKey("declare")]).toEqual(["أ", "ب", "ج", "د", "هـ", "و"]);
+    expect(cleaned.stray__blanks).toBeUndefined();
+  });
+});
+
+test("old forms turn a pre-filled declaration with blanks into a fillable statement", () => {
+  const upgraded = upgradeLegacy([
+    {
+      title: "إقرار",
+      fields: [
+        { key: "F7fa", label: "تقرير المستعلم 2", type: "textarea", default: "أقر أنا مكتب استعلامات …………… بانه قد تمت زيارة المقار المنوه عنها" },
+        { key: "f2", label: "ملاحظة", type: "textarea", default: "يوجد ما يسئ اليها (......)" },
+      ],
+    },
+  ]);
+  const [declaration, note] = upgraded.sections[0]!.fields;
+  expect(declaration!.type).toBe("attestation");
+  expect(statementBlanks(declaration!.statement)).toBe(1);
+  expect(note!.type).toBe("textarea");
 });

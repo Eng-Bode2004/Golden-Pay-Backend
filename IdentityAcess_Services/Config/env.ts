@@ -120,6 +120,8 @@ export interface AppEnv {
   readonly smtpUser: string;
   readonly smtpPass: string;
   readonly mailFrom: string;
+  /** OAuth client IDs whose Google ID tokens are accepted (the web client ID used by the app). */
+  readonly googleClientIds: string[];
 }
 
 export function loadEnv(): AppEnv {
@@ -164,6 +166,8 @@ export function loadEnv(): AppEnv {
     smtpUser: readString("SMTP_USER", "goldenpayservices@gmail.com"),
     smtpPass: process.env.SMTP_PASS?.trim() ?? "",
     mailFrom: readString("MAIL_FROM", "Golden Pay Services <goldenpayservices@gmail.com>"),
+    // GOOGLE_CLIENT_IDS (comma separated), or the same name the app build uses.
+    googleClientIds: [process.env.GOOGLE_CLIENT_IDS, process.env.GOOGLE_SERVER_CLIENT_ID].join(",").split(",").map((id) => id.trim()).filter((id, index, all) => id && all.indexOf(id) === index),
   };
 }
 

@@ -22,7 +22,7 @@ export interface TokenBundle {
   token_type: "Bearer";
   expires_in: number;
   refresh_expires_in: number;
-  auth_method: "password" | "biometric";
+  auth_method: "password" | "biometric" | "google";
   session: {
     session_id: string;
     created_at: Date;
@@ -32,7 +32,7 @@ export interface TokenBundle {
 
 export async function createSession(
   user: Pick<User, "user_id">,
-  authMethod: "password" | "biometric",
+  authMethod: "password" | "biometric" | "google",
   metadata: DeviceMetadata,
 ): Promise<TokenBundle> {
   const sessionId = newId();
