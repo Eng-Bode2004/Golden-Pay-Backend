@@ -707,7 +707,13 @@ export function validateAnswers(definition: TemplateDefinition, answers: Answers
       const confirmed = value === true || value === "true" || value === "نعم";
       if (required && !confirmed) issues.push({ key: field.key, label: field.label, message: `«${field.label}» مطلوب` });
       const blanks = statementBlanks(field.statement);
-      if (confirmed && blanks) {
+      const edited = editedStatement(field, answers);
+      if (confirmed && edited) {
+        // A rewritten sentence must not keep any dots or brackets waiting to be filled.
+        if (UNFILLED.test(edited)) {
+          issues.push({ key: field.key, label: field.label, message: `أكمل الفراغات في «${field.label}» قبل تأكيده` });
+        }
+      } else if (confirmed && blanks) {
         const typed = answers[blanksKey(field.key)];
         const filled = Array.isArray(typed) ? typed.filter((item) => String(item ?? "").trim()).length : 0;
         if (filled < blanks) {
@@ -746,6 +752,12 @@ export function cleanAnswers(definition: TemplateDefinition, answers: Answers): 
   const visible = new Map(visibleFields(definition, answers).map((field) => [field.key, field]));
   const output: Answers = {};
   for (const [key, value] of Object.entries(answers)) {
+    if (key.endsWith("__text")) {
+      // A statement the investigator rewrote travels with that statement.
+      const owner = visible.get(key.slice(0, -"__text".length));
+      if (owner?.type === "attestation" && typeof value === "string" && value.trim()) output[key] = value.trim().slice(0, 2000);
+      continue;
+    }
     if (key.endsWith("__blanks")) {
       // Words typed into a statement's blanks travel with that statement.
       const owner = visible.get(key.slice(0, -"__blanks".length));
@@ -777,10 +789,23 @@ export function cleanAnswers(definition: TemplateDefinition, answers: Answers): 
 // ───────────────────────── statement blanks ─────────────────────────
 
 /**
- * Gaps the investigator fills inside a statement: runs of dots (….. or ......),
- * underscores, or empty brackets "( )". Each run is one blank, in reading order.
+ * Gaps the investigator fills inside a statement, in reading order: runs of dots (….. or
+ * ......), underscores, tatweel (ـــــ) or dashes (-----), empty brackets "( )", the name
+ * after a title ("السيد/ ", "السيدة/ "…) when nothing follows it, and a colon that ends the
+ * sentence ("تمت مقابلة كل من :"). The mobile app uses the same pattern.
  */
-const BLANK = /\.{3,}|…+|_{3,}|\(\s*\)/g;
+const BLANK = /\.{3,}|…+|_{3,}|ـ{3,}|-{4,}|\(\s*\)|(?<=(?:السيد|السيدة|الأستاذ|الاستاذ|الأستاذة|المهندس|الدكتور|السادة)\/)\s*(?=\/|\)|$)|[:：]\s*$/g;
+/** What still marks a blank in a sentence the investigator rewrote. */
+const UNFILLED = /\.{3,}|…+|_{3,}|ـ{3,}|\(\s*\)/;
+
+/** Answers key holding the whole sentence when the investigator rewrote it. */
+export const statementTextKey = (key: string) => `${key}__text`;
+
+/** The sentence the investigator wrote for a statement, if they rewrote it. */
+export function editedStatement(field: FieldDef, answers: Answers): string | null {
+  const value = answers[statementTextKey(field.key)];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
 
 /** Answers key holding the words typed into a statement's blanks. */
 export const blanksKey = (key: string) => `${key}__blanks`;
@@ -801,14 +826,23 @@ export function fillStatement(statement: string, values: unknown): string {
   return statement.replace(BLANK, (blank) => {
     const value = list[index++];
     if (!value) return blank;
-    return blank.startsWith("(") ? `(${value})` : value;
+    if (blank.startsWith("(")) return `(${value})`;
+    if (/^[:：]/.test(blank)) return `: ${value}`;
+    // A name after "السيد/": keep a space before what follows it.
+    if (!blank.trim() && blank.length < 3) return `${value} `;
+    return value;
   });
 }
 
-/** What a confirmed statement says, with the investigator's words in its blanks. */
+/**
+ * What a confirmed statement says: the sentence the investigator rewrote, else the
+ * statement with their words in its blanks.
+ */
 export function statementText(field: FieldDef, answers: Answers): string {
+  const edited = editedStatement(field, answers);
+  if (edited) return edited;
   const sentence = field.statement?.trim() || field.label;
-  return fillStatement(sentence, answers[blanksKey(field.key)]);
+  return fillStatement(sentence, answers[blanksKey(field.key)]).replace(/\s+\)/g, ")").replace(/[ \t]{2,}/g, " ");
 }
 
 // ───────────────────────── reusable blocks ─────────────────────────

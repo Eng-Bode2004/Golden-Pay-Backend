@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { ApkError, readApkVersion } from "../../apk.ts";
 
 const RELEASES = join(import.meta.dir, "..", "..", "..", "..", "releases");
-const apks = existsSync(RELEASES) ? readdirSync(RELEASES).filter((name) => /^golden-pay-v[\d.]+-\d+-/.test(name)) : [];
+// The three newest builds are enough (each is about 80 MB).
+const apks = existsSync(RELEASES) ? readdirSync(RELEASES).filter((name) => /^golden-pay-v[\d.]+-\d+-/.test(name)).sort().slice(-3) : [];
 
 describe("reading an APK's version", () => {
   test.if(apks.length > 0)("the version code matches the build number in the file name", () => {
@@ -17,7 +18,7 @@ describe("reading an APK's version", () => {
       expect(version.versionName).toMatch(/^\d+(\.\d+)*$/);
       expect(version.packageName).toBeTruthy();
     }
-  });
+  }, 120_000);
 
   test("a file that is not an APK is refused", () => {
     expect(() => readApkVersion(new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0, 0, 0]))).toThrow(ApkError);

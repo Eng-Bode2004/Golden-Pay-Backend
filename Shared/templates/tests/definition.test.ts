@@ -13,8 +13,7 @@ import {
   upgradeLegacy,
   validateAnswers,
   type EvidenceContext,
-  type TemplateDefinition,
-} from "../definition.ts";
+  type TemplateDefinition, statementTextKey} from "../definition.ts";
 
 const noEvidence: EvidenceContext = { photos: {}, locations: [] };
 const onSite: EvidenceContext = {
@@ -189,6 +188,35 @@ describe("statements with blanks", () => {
     const cleaned = cleanAnswers(declaration, { declare: true, [blanksKey("declare")]: [" أ ", "ب", "ج", "د", "هـ", "و", "زائد"], stray__blanks: ["x"] });
     expect(cleaned[blanksKey("declare")]).toEqual(["أ", "ب", "ج", "د", "هـ", "و"]);
     expect(cleaned.stray__blanks).toBeUndefined();
+  });
+});
+
+describe("writing inside statements", () => {
+  const sources = "بسؤال المصادر الخارجية (1- السيد/ //2- السيد/ ) تعرفوا علي المقر";
+  const asked = "تم سؤال من داخل المعرض كلاً من :";
+  const visit = form([
+    { key: "asked", label: "من تم سؤاله", type: "attestation", statement: asked, evidence: { kind: "visit", requires: [{ type: "gps", max_meters: 500 }] } },
+  ]);
+  const field = visit.sections[0]!.fields[0]!;
+
+  test("names after «السيد/» and a closing colon are places to write", () => {
+    expect(statementBlanks(sources)).toBe(2);
+    expect(fillStatement(sources, ["أحمد علي", "محمود سالم"])).toBe("بسؤال المصادر الخارجية (1- السيد/أحمد علي //2- السيد/محمود سالم ) تعرفوا علي المقر");
+    expect(statementBlanks(asked)).toBe(1);
+    expect(statementText(field, { [blanksKey("asked")]: ["مدير المعرض والمحاسب"] })).toBe("تم سؤال من داخل المعرض كلاً من : مدير المعرض والمحاسب");
+    // Ordinary sentences gain no blanks.
+    expect(statementBlanks("تمت زيارة المقر - وهو مفتوح - في موعده")).toBe(0);
+  });
+
+  test("the investigator can rewrite the whole sentence; it prints as written", () => {
+    const answers = { asked: true, [statementTextKey("asked")]: "  تم سؤال مدير المعرض أحمد علي والمحاسب  " };
+    expect(issuesOf(visit, answers, onSite)).toEqual([]);
+    expect(statementText(field, answers)).toBe("تم سؤال مدير المعرض أحمد علي والمحاسب");
+    expect(cleanAnswers(visit, answers)[statementTextKey("asked")]).toBe("تم سؤال مدير المعرض أحمد علي والمحاسب");
+  });
+
+  test("a rewritten sentence that still has dots to fill cannot be confirmed", () => {
+    expect(issuesOf(visit, { asked: true, [statementTextKey("asked")]: "تم سؤال ........ والمحاسب" }, onSite)).toContain("asked");
   });
 });
 

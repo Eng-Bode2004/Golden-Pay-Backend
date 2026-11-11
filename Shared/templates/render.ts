@@ -33,6 +33,7 @@ import {
   isRequired,
   missingEvidence,
   statementBlanks,
+  editedStatement,
   statementText,
   type TemplateDefinition,
   visibleFields,
@@ -524,7 +525,9 @@ export class TemplateRenderer {
     if (confirmed && !gaps.length) {
       // A placed point: write the statement. A client sentence: keep it as written, unless
       // it has blanks the investigator filled; then it is replaced by the completed sentence.
-      if (point || statementBlanks(field.statement)) this.writeAt(mark, statementText(field, this.data.answers));
+      if (point || statementBlanks(field.statement) || editedStatement(field, this.data.answers)) {
+        this.writeAt(mark, statementText(field, this.data.answers));
+      }
       return;
     }
     this.issues.push(
