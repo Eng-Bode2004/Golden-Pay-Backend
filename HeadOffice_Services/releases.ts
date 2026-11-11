@@ -5,10 +5,13 @@ import { PERMISSIONS } from "../IdentityAcess_Services/Services/rbac.service.ts"
 import { getStoredFile, putStoredFile, removeStoredFile } from "../IdentityAcess_Services/Utils/files.ts";
 import { ApiError, created, ok, readJson, type RequestContext } from "../IdentityAcess_Services/Utils/http.ts";
 import type { Router } from "../IdentityAcess_Services/Utils/router.ts";
+import { logger } from "../IdentityAcess_Services/Utils/logger.ts";
+import { ApkError, readApkVersion } from "../Shared/apk.ts";
 import { optionalText } from "../Shared/service.ts";
 
 /**
- * Mobile app updates. Head office uploads each new APK with its version code; the app asks
+ * Mobile app updates. Head office uploads each new APK; its version code is read from the
+ * APK itself (the number Android compares), never typed. The app asks
  * `/app/version` on start, and when a higher version exists it downloads the APK and hands
  * it to Android's installer, which installs it over the current app (same signing key).
  */
@@ -20,6 +23,37 @@ const COLUMNS = `release_id, platform, version_name, version_code::float8 AS ver
   (SELECT full_name FROM users WHERE user_id = r.created_by) AS created_by_name`;
 
 const downloadUrl = (id: string) => `/api/v1/app/releases/${id}/apk`;
+
+/**
+ * Releases uploaded before the version was read from the APK may carry a typed code that
+ * does not match the APK (so phones never see them as newer). Each one is checked once
+ * against its file and corrected; a duplicate of a newer release is switched off.
+ */
+let checking: Promise<void> | null = null;
+function checkReleaseCodes(): Promise<void> {
+  checking ??= (async () => {
+    const rows = await query("SELECT release_id, path, version_code::float8 AS version_code FROM app_releases WHERE NOT code_checked");
+    for (const row of rows) {
+      try {
+        const real = readApkVersion(await getStoredFile(row.path as string)).versionCode;
+        if (real !== Number(row.version_code)) {
+          const [taken] = await query("SELECT 1 FROM app_releases WHERE platform = 'android' AND version_code = $1 AND release_id <> $2", [real, row.release_id]);
+          if (taken) await query("UPDATE app_releases SET active = false, code_checked = true WHERE release_id = $1", [row.release_id]);
+          else await query("UPDATE app_releases SET version_code = $2, code_checked = true WHERE release_id = $1", [row.release_id, real]);
+          logger.info("app_release.code_corrected", { release_id: row.release_id, typed: row.version_code, real, duplicate: Boolean(taken) });
+        } else {
+          await query("UPDATE app_releases SET code_checked = true WHERE release_id = $1", [row.release_id]);
+        }
+      } catch (error) {
+        logger.warn("app_release.code_check_failed", { release_id: row.release_id, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+  })().catch((error) => {
+    checking = null; // Try again on the next request.
+    logger.warn("app_release.code_check_failed", { error: error instanceof Error ? error.message : String(error) });
+  });
+  return checking;
+}
 
 function withManage(handler: (context: RequestContext, auth: AuthContext) => Promise<Response>) {
   return withAuth((context, auth) => {
@@ -33,6 +67,7 @@ export function registerReleaseRoutes(router: Router): void {
   router.get("/app/version", async (context) => {
     const platform = context.url.searchParams.get("platform") === "ios" ? "ios" : "android";
     const current = Number(context.url.searchParams.get("code") ?? 0) || 0;
+    await checkReleaseCodes();
     const [latest] = await query(
       `SELECT ${COLUMNS} FROM app_releases r WHERE platform = $1 AND active ORDER BY version_code DESC LIMIT 1`,
       [platform],
@@ -65,9 +100,10 @@ export function registerReleaseRoutes(router: Router): void {
 
   router.get(
     "/headoffice/app-releases",
-    withManage(async () =>
-      ok({ releases: await query(`SELECT ${COLUMNS} FROM app_releases r ORDER BY version_code DESC LIMIT 100`) }),
-    ),
+    withManage(async () => {
+      await checkReleaseCodes();
+      return ok({ releases: await query(`SELECT ${COLUMNS} FROM app_releases r ORDER BY version_code DESC LIMIT 100`) });
+    }),
   );
 
   router.post(
@@ -87,24 +123,35 @@ export function registerReleaseRoutes(router: Router): void {
       if (bytes[0] !== 0x50 || bytes[1] !== 0x4b || bytes[2] !== 0x03 || bytes[3] !== 0x04) {
         throw ApiError.badRequest("This file is not an Android APK", { field: "apk" });
       }
-      const versionName = optionalText(form.get("version_name"), 40);
-      if (!versionName || !/^\d+(\.\d+){0,3}$/.test(versionName)) {
-        throw ApiError.badRequest("Write the version like 1.2.0", { field: "version_name" });
+      // The version Android compares comes from the APK itself, so it can never be mistyped.
+      let apk;
+      try {
+        apk = readApkVersion(bytes);
+      } catch (error) {
+        if (error instanceof ApkError) throw ApiError.badRequest(error.message, { field: "apk" });
+        throw error;
       }
-      const versionCode = Number(form.get("version_code"));
-      if (!Number.isInteger(versionCode) || versionCode < 1 || versionCode > 2_100_000_000) {
-        throw ApiError.badRequest("The version code must be a whole number", { field: "version_code" });
+      const versionCode = apk.versionCode;
+      // The name is only a label for people: what was written, else the APK's own.
+      const typedName = optionalText(form.get("version_name"), 40);
+      if (typedName && !/^\d+(\.\d+){0,3}$/.test(typedName)) {
+        throw ApiError.badRequest("Write the version like 1.2.0, or leave it empty", { field: "version_name" });
       }
-      const [highest] = await query("SELECT max(version_code)::bigint AS code FROM app_releases WHERE platform = 'android'");
+      const versionName = typedName || apk.versionName || "1.0.0";
+      await checkReleaseCodes();
+      const [highest] = await query("SELECT max(version_code)::bigint AS code FROM app_releases WHERE platform = 'android' AND active");
       if (highest?.code && versionCode <= Number(highest.code)) {
-        throw new ApiError(409, "VERSION_NOT_NEWER", "The version code must be higher than the last upload", {
-          details: { field: "version_code", last: Number(highest.code) },
-        });
+        throw new ApiError(
+          409,
+          "VERSION_NOT_NEWER",
+          `This APK (version code ${versionCode}) is not newer than the last upload (${Number(highest.code)}). Build a new APK with build-apk.sh and upload that one.`,
+          { details: { field: "apk", apk: versionCode, last: Number(highest.code) } },
+        );
       }
       const sha256 = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
       const [row] = await query(
-        `INSERT INTO app_releases(platform,version_name,version_code,notes,mandatory,size_bytes,sha256,path,created_by)
-         VALUES('android',$1,$2,$3,$4,$5,$6,'',$7) RETURNING release_id`,
+        `INSERT INTO app_releases(platform,version_name,version_code,notes,mandatory,size_bytes,sha256,path,created_by,code_checked)
+         VALUES('android',$1,$2,$3,$4,$5,$6,'',$7,true) RETURNING release_id`,
         [versionName, versionCode, optionalText(form.get("notes"), 2000), form.get("mandatory") === "true", bytes.byteLength, sha256, auth.user.user_id],
       );
       const id = row!.release_id as string;
@@ -122,7 +169,7 @@ export function registerReleaseRoutes(router: Router): void {
         context,
         metadata: { version_name: versionName, version_code: versionCode, size: bytes.byteLength },
       });
-      return created({ release_id: id });
+      return created({ release_id: id, version_code: versionCode, version_name: versionName, package_name: apk.packageName });
     }),
   );
 

@@ -127,3 +127,5 @@ CREATE TABLE IF NOT EXISTS app_releases (
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (platform, version_code)
 );
+-- Whether version_code was checked against the APK file itself (see releases.ts).
+ALTER TABLE app_releases ADD COLUMN IF NOT EXISTS code_checked boolean NOT NULL DEFAULT false;
