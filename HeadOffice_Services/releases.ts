@@ -14,7 +14,9 @@ import { optionalText } from "../Shared/service.ts";
  */
 
 const MAX_APK_BYTES = 200 * 1024 * 1024;
-const COLUMNS = `release_id, platform, version_name, version_code, notes, mandatory, size_bytes, sha256, active, created_at,
+// bigint columns come back as text from PostgreSQL; send them as numbers.
+const COLUMNS = `release_id, platform, version_name, version_code::float8 AS version_code, notes, mandatory,
+  size_bytes::float8 AS size_bytes, sha256, active, created_at,
   (SELECT full_name FROM users WHERE user_id = r.created_by) AS created_by_name`;
 
 const downloadUrl = (id: string) => `/api/v1/app/releases/${id}/apk`;
