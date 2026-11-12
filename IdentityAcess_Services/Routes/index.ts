@@ -3,6 +3,7 @@ import { registerAuthRoutes } from "./auth.routes.ts";
 import { registerUserRoutes } from "./user.routes.ts";
 import { registerAdminRoutes } from "./admin.routes.ts";
 import { registerAdminSecurityRoutes } from "./admin-security.routes.ts";
+import { registerSystemRoutes } from "./system.routes.ts";
 
 export function createRouter(): Router {
   const router = new Router();
@@ -10,5 +11,6 @@ export function createRouter(): Router {
   registerUserRoutes(router);
   registerAdminRoutes(router);
   registerAdminSecurityRoutes(router);
+  registerSystemRoutes(router);
   return router;
 }
