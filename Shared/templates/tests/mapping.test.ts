@@ -253,3 +253,14 @@ describe("every archive template", () => {
     expect(allFields(scan.definition).length).toBeGreaterThan(20);
   });
 });
+
+describe("label lines with nothing after the colon", () => {
+  test("every «Label :» line of Global's showroom form becomes a field", () => {
+    const scan = scanTemplate(file("Global Company", "تكويد معرض سيارات", "تكويد معرض سيارات.docx"));
+    const labels = allFields(scan.definition).map((field) => field.label);
+    for (const label of ["اسم المعرض", "بيانات مسؤول التواصل", "مواعيد العمل", "عدد الموظفين", "البنوك المتعامل معها", "عدد السيارات", "سجل المستوردين", "وصف المقر"]) {
+      expect(labels).toContain(label);
+    }
+    expect(allFields(scan.definition).filter((field) => field.type === "attestation").length).toBeLessThanOrEqual(1);
+  });
+});

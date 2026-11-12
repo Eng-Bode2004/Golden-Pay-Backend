@@ -596,8 +596,13 @@ export class TemplateScanner {
       return;
     }
     pattern.lastIndex = 0;
+    // "اسم المعرض :" with nothing after it: the investigator writes right after the colon.
+    // Only when the next line does not carry the blank itself (that line takes the label).
     const trailing =
-      pattern === GAPS && /[:：]\s*$/.test(text) && descendants(paragraph, "drawing").length > 0 && !this.isHeading(paragraph, text.trim());
+      pattern === GAPS &&
+      /[:：]\s*$/.test(text) &&
+      (!this.isHeading(paragraph, text.trim()) || this.inLabelList(paragraph, text.trim())) &&
+      (descendants(paragraph, "drawing").length > 0 || (text.trim().length < 60 && !this.blankFollows(paragraph)));
     if (pattern.test(text) || trailing) {
       pattern.lastIndex = 0;
       this.placeholders(paragraph, part, cellLabel, pattern, false, trailing);
@@ -625,6 +630,28 @@ export class TemplateScanner {
     }
     this.pendingLabel = /[:：]\s*$/.test(text) && text.length < 80 ? normalizeLabel(text) : "";
     if (looksLikeLabel(text.trim())) this.lastLabel = normalizeLabel(text);
+  }
+
+  /** The text of the next written paragraph in the same flow ("" at a table or the end). */
+  private nextText(paragraph: El): string {
+    for (let node = paragraph.nextSibling; node; node = node.nextSibling) {
+      if (node.nodeType !== 1) continue;
+      if (!isW(node, "p")) return "";
+      const next = textOf(node as El).trim();
+      if (next) return next;
+    }
+    return "";
+  }
+
+  /** Whether the next written paragraph opens with a blank (dots, underscores, empty brackets). */
+  private blankFollows(paragraph: El): boolean {
+    return /^([.…_ـ]{4,}|-{5,}|\(\s*[.…]*\s*\))/.test(this.nextText(paragraph));
+  }
+
+  /** A "Label :" line followed by another one: a list of fields, even when bold. */
+  private inLabelList(paragraph: El, text: string): boolean {
+    const next = this.nextText(paragraph);
+    return /[:：]\s*$/.test(text) && text.length < 60 && /^[^:：]{2,40}[:：]/.test(next);
   }
 
   private blankPattern(paragraph: El): RegExp {
