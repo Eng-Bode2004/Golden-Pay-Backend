@@ -37,6 +37,30 @@ import {
 } from "../Services/google.service.ts";
 import { consumeRateLimit, RATE_LIMITS } from "../MIddlewares/rateLimit.middleware.ts";
 import type { AuthContext } from "../MIddlewares/auth.middleware.ts";
+import { AREA_LEVELS, hasWorkArea, parseWorkArea, saveWorkArea, type WorkArea } from "../../Shared/work-area.ts";
+
+/**
+ * The work area an investigator picked while signing up (checked before the account is made,
+ * so a bad area never leaves a half-made account). Older app versions send none: null.
+ */
+function signupWorkArea(form: FormData): WorkArea | null {
+  const body: Record<string, unknown> = {};
+  for (const key of [...AREA_LEVELS, "street", "lat", "lng"]) {
+    const value = form.get(key);
+    if (typeof value !== "string" || value.trim() === "") continue;
+    body[key] = key === "lat" || key === "lng" ? Number(value) : value;
+  }
+  return hasWorkArea(body) ? parseWorkArea(body) : null;
+}
+
+/** The account already exists: a failed save is logged, and the app asks again after login. */
+async function keepWorkArea(area: WorkArea, userId: string): Promise<void> {
+  try {
+    await saveWorkArea(area, userId);
+  } catch (error) {
+    console.error("[signup] work area not saved", { userId, error: error instanceof Error ? error.message : String(error) });
+  }
+}
 
 export async function loginController(context: RequestContext): Promise<Response> {
   const body = await readJson(context.req);
@@ -119,17 +143,21 @@ export async function signupExistingCompleteController(
   }
 
   const form = await readFormData(context.req);
+  const area = signupWorkArea(form);
   const google = await googleForSignup(form);
   const result = await completeExistingEmployeeSignup(signupToken, form, context);
   if (google) await linkGoogle(result.user_id, google);
+  if (area) await keepWorkArea(area, result.user_id);
   return created(result);
 }
 
 export async function signupNewController(context: RequestContext): Promise<Response> {
   const form = await readFormData(context.req);
+  const area = signupWorkArea(form);
   const google = await googleForSignup(form);
   const result = await signupNewInvestigator(form, context);
   if (google) await linkGoogle(result.user_id, google);
+  if (area) await keepWorkArea(area, result.user_id);
   return created(result);
 }
 

@@ -772,12 +772,18 @@ router.post(
       metadata: { reference: row.reference },
     });
     // The report takes seconds; the investigator should not wait for it.
+    // Filled without internet and sent by the app when it came back: the admin sees when.
+    const filledOffline = typeof body.filled_offline_at === "string" ? new Date(body.filled_offline_at) : null;
+    const offlineNote =
+      filledOffline && !Number.isNaN(filledOffline.getTime()) && filledOffline.getTime() <= Date.now() + 60_000
+        ? `عُبّئ دون إنترنت في ${filledOffline.toLocaleString("ar-EG", { timeZone: "Africa/Cairo" })} وأُرسل عند عودة الاتصال`
+        : null;
     await logEvent(
       row.investigation_id as string,
       row.submitted_at ? "resubmitted" : "submitted",
       auth.user.user_id,
       null,
-      negative ? "استعلام سلبي" : null,
+      [negative ? "استعلام سلبي" : null, offlineNote].filter(Boolean).join(" — ") || null,
     );
     void buildReport(row.investigation_id as string);
     // This investigator may now be free for a waiting case.
