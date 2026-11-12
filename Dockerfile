@@ -31,6 +31,10 @@ RUN cd Shared && bun install --frozen-lockfile --production \
   && cd ../IdentityAcess_Services && bun install --frozen-lockfile --production
 
 COPY . .
+# Stand-ins for the Windows fonts client forms name, so their labels keep their width.
+RUN cp fonts/30-office-substitutes.conf /etc/fonts/conf.d/30-office-substitutes.conf \
+  && fc-cache -f \
+  && fc-match "Arial:lang=ar" && fc-match "Arabic Transparent" && fc-match "Times New Roman:lang=ar"
 # Thalmet Cloud runs containers unprivileged on a read-only filesystem: run as the image's
 # non-root user, and write only to /tmp (report conversion, Chromium and LibreOffice
 # profiles). Uploaded and generated files go to the cloud bucket (STORAGE_*).
