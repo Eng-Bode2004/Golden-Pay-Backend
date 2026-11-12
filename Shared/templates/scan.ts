@@ -211,6 +211,8 @@ export class TemplateScanner {
   private readonly warnings: string[] = [];
   private section = "بيانات الاستعلام";
   private pendingLabel = "";
+  /** The options of the checkbox question just read, so its own words are not taken for blanks. */
+  private lastOptions: string[] = [];
   private readonly consumed = new WeakSet<El>();
   /** Cells that receive a new picture (stamp, signature, photos); old pictures there are removed. */
   private readonly imageCells = new WeakSet<El>();
@@ -421,7 +423,8 @@ export class TemplateScanner {
     if (extent) {
       const cx = Number(extent.getAttribute("cx"));
       const cy = Number(extent.getAttribute("cy"));
-      return cx > 40000 && cy > 40000 && cx < 420000 && cy < 420000 && Math.abs(cx - cy) / Math.max(cx, cy) < 0.4;
+      // Some forms draw their boxes about twice as wide as tall (Alex Bank: 6 × 3 mm).
+      return cx > 40000 && cy > 40000 && cx < 420000 && cy < 420000 && Math.abs(cx - cy) / Math.max(cx, cy) < 0.56;
     }
     // Legacy drawings: a small rectangle or plain shape without a picture or text.
     const rect = ["rect", "shape", "roundrect"].flatMap((name) => descendants(drawing, name, NS.v)).find((el) => !descendants(el, "imagedata", NS.v).length);
@@ -591,7 +594,7 @@ export class TemplateScanner {
       const floating = this.checkboxGroup([paragraph], part, cellLabel);
       // Floating boxes leave the paragraph's own blanks untouched; read them too.
       pattern.lastIndex = 0;
-      if (floating && pattern.test(textOf(paragraph))) this.placeholders(paragraph, part, cellLabel, pattern, true);
+      if (floating && pattern.test(textOf(paragraph))) this.placeholders(paragraph, part, cellLabel, pattern, true, false, this.lastOptions);
       pattern.lastIndex = 0;
       return;
     }
@@ -665,10 +668,21 @@ export class TemplateScanner {
     pattern: RegExp = PLACEHOLDER,
     afterOptions = false,
     trailing = false,
+    options: string[] = [],
   ): void {
     const text = textOf(paragraph);
     pattern.lastIndex = 0;
-    const matches = [...text.matchAll(pattern)];
+    let matches = [...text.matchAll(pattern)];
+    if (options.length) {
+      // Beside floating boxes, runs of spaces only separate the options, and a "not provided"
+      // printed right after an option is the form's own box-less choice, not a blank.
+      matches = matches.filter((match) => {
+        if (!match[0].trim()) return false;
+        if (!NOT_PROVIDED.test(match[0])) return true;
+        const before = text.slice(0, match.index!).split(/\s{2,}/).map(normalizeLabel).filter(Boolean).pop() ?? "";
+        return !options.includes(before);
+      });
+    }
     let previousEnd = 0;
     const found: { start: number; end: number; label: string; sample: boolean }[] = [];
     const labelOf = (chunk: string) => {
@@ -770,11 +784,27 @@ export class TemplateScanner {
         anyFloating = true;
         const split = text.search(/[:：؟?]/);
         if (split >= 0 && !groupLabel) groupLabel = normalizeLabel(text.slice(0, split));
-        const words = text
-          .slice(split + 1)
-          .split(/\s{2,}/)
-          .map((word) => normalizeLabel(word))
-          .filter((word) => word && !NOT_PROVIDED.test(word) && !/[:：]/.test(word));
+        const optionWords = (chunk: string) =>
+          chunk
+            .split(/\s{2,}/)
+            .map((word) => normalizeLabel(word))
+            .filter((word) => word && !NOT_PROVIDED.test(word) && !/[:：]/.test(word));
+        const words = optionWords(text.slice(split + 1));
+        if (split < 0 && words.length > 1 && /^(هل|ما|كم)\s/.test(words[0]!)) {
+          // "هل العميل كان متواجد اثناء الزيارة   نعم   لا": a question without a colon.
+          const question = words.shift()!;
+          if (!groupLabel) groupLabel = question;
+        }
+        if (split >= 0 && words.length < positions.length) {
+          // Text boxes can leave the options before the question in the file's order:
+          // "مؤقت   مؤقت ويجدد   مقابل اجر  نوع العقد :   دائم". The question is the last phrase.
+          const before = optionWords(text.slice(0, split));
+          const question = before.pop();
+          if (question && before.length) {
+            groupLabel = label ?? question;
+            words.push(...before);
+          }
+        }
         const ordered = [...positions].sort((a, b) => (b.floating ?? 0) - (a.floating ?? 0));
         ordered.forEach((atom, index) => boxes.push({ paragraph, atom, option: words[index] ?? "" }));
         continue;
@@ -820,6 +850,7 @@ export class TemplateScanner {
       if (!box.option) box.option = optionHint?.[index] ?? `خيار ${index + 1}`;
     });
     const options = [...new Set(boxes.map((box) => box.option))];
+    this.lastOptions = options;
     const name = groupLabel || this.pendingLabel || boxes.map((box) => box.option).slice(0, 2).join(" / ");
     const exclusive = options.length <= 3 || options.every((option) => /^(نعم|لا|يوجد|لا يوجد|ملك|إيجار|ايجار)$/.test(option));
     const { key } = this.field(name, exclusive ? "choice" : "multichoice", { options });

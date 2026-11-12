@@ -264,3 +264,18 @@ describe("label lines with nothing after the colon", () => {
     expect(allFields(scan.definition).filter((field) => field.type === "attestation").length).toBeLessThanOrEqual(1);
   });
 });
+
+describe("Alex Bank's drawn boxes", () => {
+  test("wide drawn squares, options before the question and a question without a colon", () => {
+    const scan = scanTemplate(file("Alex Bank", "استعلام عمل", "اسكندرية.docx"));
+    const fields = allFields(scan.definition);
+    const options = (label: string) => fields.find((field) => field.label === label)?.options;
+    expect(options("نوع العقد")).toEqual(["دائم", "مؤقت", "مؤقت ويجدد", "مقابل اجر"]);
+    expect(options("هل العميل مؤمن عليه")).toEqual(["نعم", "لا"]);
+    expect(options("هل تم الاطلاع علي الاوراق الخاصه للنشاط")).toEqual(["نعم", "لا"]);
+    expect(options("هل العميل كان متواجد اثناء الزيارة")).toEqual(["نعم", "لا"]);
+    // The spaces between options are not blanks to fill in.
+    expect(fields.map((field) => field.label)).not.toContain("لا");
+    expect(fields.map((field) => field.label)).not.toContain("هل العنوان صحيح؟");
+  });
+});
