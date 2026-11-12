@@ -21,6 +21,12 @@ export const RENDERER_VERSION: string = (() => {
   for (const name of readdirSync(import.meta.dir).filter((file) => /\.(ts|ps1)$/.test(file)).sort()) {
     hash.update(name).update("|").update(readFileSync(join(import.meta.dir, name))).update("|");
   }
+  // The server's font stand-ins change how client layouts are drawn too.
+  try {
+    hash.update(readFileSync(join(import.meta.dir, "..", "..", "fonts", "30-office-substitutes.conf")));
+  } catch {
+    // Not in every checkout (tests run without it).
+  }
   return hash.digest("hex").slice(0, 16);
 })();
 
