@@ -33,11 +33,16 @@ function placeIds(pkg: DocxPackage, part: string): Set<string> {
 
 /** The paragraph's direct children covering characters [from, to), after splitting runs at both ends. */
 function rangeNodes(paragraph: El, from: number, to: number): { nodes: El[]; after: El | null } {
-  const after = splitAt(paragraph, to);
+  let after = splitAt(paragraph, to);
   const first = splitAt(paragraph, from);
   const nodes: El[] = [];
   for (let node = first as Node | null; node && node !== after; node = node.nextSibling) {
     if (node.nodeType === 1) nodes.push(node as El);
+  }
+  // A range to the end of the line stops at its last character: a point placed after it is
+  // not part of the change.
+  if (!after) {
+    while (nodes.length && ["bookmarkStart", "bookmarkEnd", "proofErr"].includes(local(nodes[nodes.length - 1]!))) after = nodes.pop()!;
   }
   return { nodes, after };
 }
@@ -154,12 +159,15 @@ function checkEditable(node: El, places: Set<string>): void {
     throw new PlaceError("The change reaches across a field's place; edit the words on one side of it only");
   }
   if (kind === "r") {
+    // Like Word, deleting words also deletes the shapes, old form controls (w:object) and box
+    // symbols between them, unless one of them holds a field's place.
+    if (descendants(node, "bookmarkStart").some((mark) => places.has(attr(mark, "id") ?? ""))) {
+      throw new PlaceError("The selection includes a field's place; edit the words on one side of it only");
+    }
     for (const item of children(node)) {
       if (item.namespaceURI === NS.w && PLAIN_RUN.has(local(item))) continue;
-      if (descendants(item, "blip", NS.a).length || local(item) === "drawing" || local(item) === "pict" || local(item) === "AlternateContent") {
-        throw new PlaceError("The selection includes a picture; move or delete pictures with the picture tools");
-      }
-      throw new PlaceError("The selection includes a checkbox or a Word field. To delete an option's box, click it in «ربط الحقول» and press «حذف المربع»");
+      if (["drawing", "pict", "object", "AlternateContent", "sym"].includes(local(item))) continue;
+      throw new PlaceError("The selection includes a Word field (page number, date or similar) that cannot be typed over");
     }
     return;
   }

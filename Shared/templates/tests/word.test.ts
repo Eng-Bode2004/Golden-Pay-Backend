@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { allFields, type Answers } from "../definition.ts";
 import { attr, child, descendants, DocxPackage, type El, NS, textOf } from "../docx.ts";
-import { paragraphsOf, PlaceError } from "../edit.ts";
+import { insertPlace, paragraphsOf, PlaceError, removePlace } from "../edit.ts";
 import { layoutHtml } from "../preview.ts";
 import { renderTemplate } from "../render.ts";
 import { scanTemplate } from "../scan.ts";
@@ -221,5 +221,35 @@ describe("text boxes", () => {
     expect(() =>
       renderTemplate(saved.save(), bindings, { definition: mogoWork.definition, answers: {}, caseValues: {}, images: {}, evidence: { photos: {}, locations: [] } }),
     ).not.toThrow();
+  });
+});
+
+describe("deleting words with old form controls between them", () => {
+  // CIB's supplier form: «الشركة عبارة عن  [□] مصنع  [□] مقر ادارى  اخرى (…………)»,
+  // where each □ is an old Word form control (w:object).
+  const cib = load("CIB Bank", "استعلام موردين", "استعلام موردين CIB.docx");
+
+  test("the words and the controls between them go; a point at the end of the line stays", () => {
+    const pkg = DocxPackage.open(cib.docx);
+    const index = paragraphsOf(pkg, PART).findIndex((p) => textOf(p).includes("الشركة عبارة عن"));
+    const paragraph = () => paragraphsOf(pkg, PART)[index]!;
+    expect(descendants(paragraph(), "object").length).toBeGreaterThan(0);
+    // As in the live draft: the scanner's place around «(…………)» was moved away.
+    for (const mark of descendants(paragraph(), "bookmarkStart")) removePlace(pkg, attr(mark, "name") ?? "");
+    const text = textOf(paragraph());
+    const head = text.indexOf("الشركة عبارة عن") + "الشركة عبارة عن".length;
+    // A point at the very end of the line (where a value will print).
+    insertPlace(pkg, "gp_u050", { part: PART, paragraph: index, offset: text.length });
+    editText(pkg, { part: PART, paragraph: index, offset: head }, text.length, "");
+    editText(pkg, { part: PART, paragraph: index, offset: head }, head, " : ");
+    const after = paragraph();
+    expect(textOf(after)).toBe(text.slice(0, head) + " : ");
+    expect(descendants(after, "object").length).toBe(0);
+    // The typed words sit before the point, so the value prints after «:».
+    const nodes = Array.from(after.childNodes) as El[];
+    const colon = nodes.findIndex((node) => node.nodeType === 1 && textOf(node).includes(":"));
+    const point = nodes.findIndex((node) => node.localName === "bookmarkStart" && attr(node, "name") === "gp_u050");
+    expect(colon).toBeGreaterThanOrEqual(0);
+    expect(point).toBeGreaterThan(colon);
   });
 });
