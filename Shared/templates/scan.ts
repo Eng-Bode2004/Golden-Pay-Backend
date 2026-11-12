@@ -528,8 +528,45 @@ export class TemplateScanner {
     return false;
   }
 
+  /**
+   * Empty value frames: a plain rectangle drawn for an answer ("أسم الشركة [______]") but
+   * without a text box inside, so nothing could ever be written in it. It gets an empty
+   * text box, and so becomes an empty frame like the others. Lines, checkbox squares,
+   * pictures and shapes that already hold a text box are left alone.
+   */
+  private openValueFrames(paragraph: El): void {
+    for (const shape of descendants(paragraph, "wsp", NS.wps)) {
+      if (ancestor(shape, "Fallback", NS.mc)) continue;
+      const holder = ancestor(shape, "txbxContent");
+      if (holder && this.contains(paragraph, holder)) continue; // opened when its own paragraph is read
+      if (child(shape, "txbx", NS.wps) || descendants(shape, "cNvCnPr", NS.wps).length || descendants(shape, "blip", NS.a).length) continue;
+      const geometry = descendants(shape, "prstGeom", NS.a)[0]?.getAttribute("prst") ?? "";
+      if (!["rect", "roundRect"].includes(geometry)) continue;
+      const anchor = ancestor(shape, "anchor", NS.wp) ?? ancestor(shape, "inline", NS.wp);
+      const extent = anchor ? descendants(anchor, "extent", NS.wp)[0] : undefined;
+      const cx = Number(extent?.getAttribute("cx") ?? 0);
+      const cy = Number(extent?.getAttribute("cy") ?? 0);
+      if (!(cy >= 150000 && cy <= 700000 && cx >= 600000 && cx >= cy * 2.5)) continue;
+      // A box to write in: white, outlined and in front of the text (not background art).
+      if (anchor?.getAttribute("behindDoc") === "1") continue;
+      const look = child(shape, "spPr", NS.wps);
+      const fill = look ? child(look, "solidFill", NS.a) : undefined;
+      const white = fill ? /^(FFFFFF|bg1|lt1)$/i.test(child(fill, "srgbClr", NS.a)?.getAttribute("val") ?? child(fill, "schemeClr", NS.a)?.getAttribute("val") ?? "") : false;
+      if (!white || !look || !child(look, "ln", NS.a)) continue;
+      const body = child(shape, "bodyPr", NS.wps);
+      if (!body) continue;
+      const doc = shape.ownerDocument!;
+      const txbx = doc.createElementNS(NS.wps, "wps:txbx");
+      const content = wEl(doc, "txbxContent");
+      content.appendChild(wEl(doc, "p"));
+      txbx.appendChild(content);
+      shape.insertBefore(txbx, body);
+    }
+  }
+
   /** Floating text boxes: filled ones are read like the page, empty ones take a value. */
   private textBoxes(paragraph: El, part: string): void {
+    this.openValueFrames(paragraph);
     for (const box of descendants(paragraph, "txbxContent")) {
       if (ancestor(box, "Fallback", NS.mc)) continue;
       // A box inside another box of this paragraph is read when its parent box is walked.

@@ -279,6 +279,12 @@ describe("Alex Bank's drawn boxes", () => {
     expect(fields.map((field) => field.label)).not.toContain("هل العنوان صحيح؟");
   });
 
+  test("white outlined frames without a text box become boxes to write in", () => {
+    const scan = scanTemplate(file("Alex Bank", "استعلام عمل", "اسكندرية.docx"));
+    // Mobile, client name, phone, company and address: five boxes in the grey header.
+    expect(scan.slots.filter((slot) => slot.kind === "cell").length).toBe(5);
+  });
+
   test("answers never swallow the next label's first letter (tab stops are not text)", () => {
     const scan = scanTemplate(file("Alex Bank", "استعلام عمل", "اسكندرية.docx"));
     const answers: Answers = {};
