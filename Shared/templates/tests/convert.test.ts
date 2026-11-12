@@ -26,3 +26,27 @@ test("Word art page borders become a frame LibreOffice can draw; plain borders s
   // A file without art borders is passed on unchanged.
   expect(drawablePageBorders(fixed)).toBe(fixed);
 });
+
+test("Wingdings ticks become Unicode symbols for LibreOffice", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { child, descendants, DocxPackage, NS, textOf, wEl } = await import("../docx.ts");
+  const { drawablePageBorders } = await import("../convert.ts");
+  // QNB's boxes show a Wingdings tick (00FC) when checked: tick the first one as the renderer does.
+  const file = join(import.meta.dir, "..", "..", "..", "..", "Investigation Forms", "QNB Bank", "تقرير عمل", "تقرير عمل كيو ان بى.docx");
+  const pkg = DocxPackage.open(new Uint8Array(readFileSync(file)));
+  const root = pkg.xml("word/document.xml").documentElement as Element;
+  const box = descendants(root, "sdt").find((sdt) => descendants(sdt, "checkbox", NS.w14).length)!;
+  const run = descendants(box, "r").find((r) => child(r, "t"))!;
+  const rPr = child(run, "rPr")!;
+  const fonts = child(rPr, "rFonts");
+  if (fonts) rPr.removeChild(fonts);
+  rPr.insertBefore(wEl(run.ownerDocument!, "rFonts", { ascii: "Wingdings", hAnsi: "Wingdings", cs: "Wingdings" }), rPr.firstChild);
+  child(run, "t")!.textContent = String.fromCharCode(0xfc);
+  const ticked = pkg.save();
+  const fixed = drawablePageBorders(ticked);
+  const after = descendants(DocxPackage.open(fixed).xml("word/document.xml").documentElement as Element, "sdt").find((sdt) => descendants(sdt, "checkbox", NS.w14).length)!;
+  expect(textOf(after)).toBe("✓");
+  // Nothing else to change the second time.
+  expect(drawablePageBorders(fixed)).toBe(fixed);
+});

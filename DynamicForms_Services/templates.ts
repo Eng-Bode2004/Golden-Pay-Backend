@@ -386,12 +386,13 @@ export async function checkVersion(version: Row): Promise<{
 export function carryOver(scan: { definition: TemplateDefinition; bindings: Binding[] }, previous: TemplateDefinition | null): void {
   if (!previous) return;
   const old = new Map(allFields(previous).map((field) => [field.label.replace(/\s+/g, " ").trim(), field]));
-  const taken = new Set<string>();
+  // A key another new field already has is never taken over (two fields with one key break the draft).
+  const taken = new Set<string>(allFields(scan.definition).map((field) => field.key));
   const renames = new Map<string, string>();
   for (const section of scan.definition.sections) {
     section.fields = section.fields.map((field) => {
       const match = old.get(field.label.replace(/\s+/g, " ").trim());
-      if (!match || taken.has(match.key) || match.type !== field.type) return field;
+      if (!match || match.type !== field.type || (match.key !== field.key && taken.has(match.key))) return field;
       taken.add(match.key);
       renames.set(field.key, match.key);
       return { ...match, options: field.options ?? match.options };

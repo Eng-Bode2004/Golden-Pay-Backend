@@ -12,7 +12,7 @@ import { existsSync } from "node:fs";
 import { cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DocxPackage, type El, descendants } from "./docx.ts";
+import { child, DocxPackage, type El, descendants, wEl, WINGDINGS_UNICODE } from "./docx.ts";
 
 export type Engine = "libreoffice" | "word";
 
@@ -188,7 +188,55 @@ export function drawablePageBorders(bytes: Uint8Array): Uint8Array {
       changed = true;
     }
   }
+  if (unicodeSymbols(pkg)) changed = true;
   return changed ? pkg.save() : bytes;
+}
+
+/**
+ * Wingdings ticks and boxes as Unicode symbols, for a converter without the Wingdings font
+ * (it would print «ü» for a tick and drop a box). Other Wingdings symbols stay as they are.
+ */
+function unicodeSymbols(pkg: DocxPackage): boolean {
+  let changed = false;
+  const symbolFont = (run: El) => {
+    const rPr = child(run, "rPr") ?? (run.insertBefore(wEl(run.ownerDocument!, "rPr"), run.firstChild) as El);
+    const fonts = child(rPr, "rFonts");
+    if (fonts) rPr.removeChild(fonts);
+    rPr.insertBefore(wEl(run.ownerDocument!, "rFonts", { ascii: "Segoe UI Symbol", hAnsi: "Segoe UI Symbol", cs: "Segoe UI Symbol", eastAsia: "Segoe UI Symbol" }), rPr.firstChild);
+  };
+  for (const part of pkg.textParts()) {
+    const root = pkg.xml(part).documentElement as El;
+    for (const sym of descendants(root, "sym")) {
+      if (!/^wingdings/i.test(sym.getAttribute("w:font") ?? "")) continue;
+      const symbol = WINGDINGS_UNICODE[(sym.getAttribute("w:char") ?? "").toUpperCase().replace(/^F0/, "")];
+      const run = sym.parentNode as El | null;
+      if (!symbol || !run) continue;
+      const t = wEl(sym.ownerDocument!, "t");
+      t.textContent = symbol;
+      run.replaceChild(t, sym);
+      symbolFont(run);
+      changed = true;
+    }
+    for (const run of descendants(root, "r")) {
+      const fonts = child(child(run, "rPr") ?? run, "rFonts");
+      if (!fonts || ![fonts.getAttribute("w:ascii"), fonts.getAttribute("w:hAnsi"), fonts.getAttribute("w:cs")].some((font) => /^wingdings/i.test(font ?? ""))) continue;
+      let swapped = false;
+      for (const t of descendants(run, "t")) {
+        const text = [...(t.textContent ?? "")].map((char) => {
+          const code = char.charCodeAt(0);
+          const symbol = WINGDINGS_UNICODE[(code >= 0xf000 ? code - 0xf000 : code).toString(16).toUpperCase().padStart(2, "0")];
+          if (symbol && code > 0x20) swapped = true;
+          return symbol && code > 0x20 ? symbol : char;
+        }).join("");
+        t.textContent = text;
+      }
+      if (swapped) {
+        symbolFont(run);
+        changed = true;
+      }
+    }
+  }
+  return changed;
 }
 
 /** Ends every process whose command line mentions `marker` (Linux; elsewhere nothing to do). */

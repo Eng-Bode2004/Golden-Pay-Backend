@@ -87,6 +87,15 @@ export function textOf(el: El): string {
   return out;
 }
 
+/**
+ * Wingdings ticks and boxes (character code, without the F0 symbol prefix) → the same symbol
+ * in Unicode. A converter without Wingdings prints them as Latin letters («ü», «þ»).
+ */
+export const WINGDINGS_UNICODE: Record<string, string> = {
+  FC: "✓", FB: "✗", FE: "☑", FD: "☒", "78": "☒", "53": "☒", "54": "☒",
+  A8: "☐", "6F": "☐", "71": "☐", A2: "☐", A3: "☐", "70": "☐",
+};
+
 /** Wingdings box symbols read as an empty box so checkbox detection sees them. */
 export function symText(sym: El): string {
   const font = (attr(sym, "font") ?? "").toLowerCase();
