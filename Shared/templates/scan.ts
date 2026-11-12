@@ -862,10 +862,13 @@ export class TemplateScanner {
       const real = cells.filter((cell) => !cell.continued);
       if (real.every((cell) => cell.empty)) continue;
 
-      // Section title: one wide cell of short text.
+      // Section title: one wide cell of short text. "Wide" is measured against the row: a label
+      // cell spanning 3 of 15 grid columns next to an empty answer cell («اسم العميل | …») is a
+      // field, not a title.
       const filled = real.filter((cell) => !cell.empty);
+      const rowSpan = real.reduce((sum, cell) => sum + cell.span, 0) || 1;
       if (filled.length === 1 && real.length <= 2 && !filled[0]!.boxes && !filled[0]!.placeholder && !filled[0]!.nested &&
-        looksLikeLabel(filled[0]!.text) && (real.length === 1 || filled[0]!.span > 1) && !claimsAction(filled[0]!.text)) {
+        looksLikeLabel(filled[0]!.text) && (real.length === 1 || filled[0]!.span / rowSpan >= 0.6) && !claimsAction(filled[0]!.text)) {
         const below = info[r + 1];
         const labelBelow = below?.some((cell) => looksLikeLabel(cell.text));
         if (real.length === 1 || labelBelow) {
@@ -1007,14 +1010,16 @@ export class TemplateScanner {
     const label = normalizeLabel(labelText);
     this.consumed.add(target.cell);
     const anchor = this.anchor();
-    if (/ختم|توقيع|إمضاء|امضاء|^(ال)?صور|^المرفقات$|^مرفقات/.test(label)) this.imageCells.add(target.cell);
+    // «المفوض بالتوقيع» / «حق التوقيع» name who signs: a name to write, not a signature to draw.
+    const signs = /توقيع|إمضاء|امضاء/.test(label) && !/مفوض|المفوضين|حق التوقيع|بالتوقيع/.test(label);
+    if (/ختم|^(ال)?صور|^المرفقات$|^مرفقات/.test(label) || signs) this.imageCells.add(target.cell);
     if (/ختم/.test(label)) {
       this.bookmarkPoint(this.firstParagraph(target.cell), anchor);
       this.addSlot({ anchor, kind: "image", part, label, text: "", image: { md5: "", role: "golden_pay_stamp", cx: 0, cy: 0 } });
       this.bindings.push({ anchor, action: "image", source: "approval.stamp" });
       return;
     }
-    if (/توقيع|إمضاء|امضاء/.test(label)) {
+    if (signs) {
       this.bookmarkPoint(this.firstParagraph(target.cell), anchor);
       const { key } = this.field(label, "signature");
       this.addSlot({ anchor, kind: "image", part, label, text: "", image: { md5: "", role: "unknown", cx: 0, cy: 0 } });

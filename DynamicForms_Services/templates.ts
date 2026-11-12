@@ -963,9 +963,11 @@ export function registerTemplateRoutes(router: Router): void {
           if (slot?.kind === "checkbox") {
             // An option's box on the client's page: the box and its place go; the words stay.
             if (!removeBox(pkg, anchor)) removePlace(pkg, anchor);
-          } else if (!anchor.startsWith("gp_u")) {
-            throw new PlaceError("Only points added by hand and checkboxes can be removed; unbind the others instead");
-          } else removePlace(pkg, anchor);
+          } else if (!anchor.startsWith("gp_u") && bindings.some((binding) => binding.anchor === anchor)) {
+            // A place the scanner found: only its bookmark goes (the client's text stays), and
+            // only once it is unbound, so nothing that prints an answer disappears by accident.
+            throw new PlaceError("Unbind this place first; then it can be removed (the client's text stays)");
+          } else if (!removePlace(pkg, anchor)) throw new PlaceError("This place is not in the layout");
           slots = slots.filter((slot) => slot.anchor !== anchor);
           bindings = bindings.filter((binding) => binding.anchor !== anchor);
         } else if (op === "move") {
