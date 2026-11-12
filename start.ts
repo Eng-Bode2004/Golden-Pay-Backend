@@ -85,8 +85,47 @@ function start(service: { name: string; dir: string; pool: string }, restarts = 
   });
 }
 
+/**
+ * The Windows fonts client forms use, kept in the private bucket (private-fonts/, uploaded by
+ * IdentityAcess_Services/scripts/upload-fonts.ts) because they are licensed and never go in
+ * the repository. They land in $HOME/.local/share/fonts, which fontconfig reads, so LibreOffice
+ * draws the clients' layouts with Word's letter widths. Without them the stand-ins in
+ * fonts/30-office-substitutes.conf are used.
+ */
+async function installFonts(): Promise<void> {
+  const values = settings();
+  const bucketName = values.STORAGE_BUCKET || values.S3_BUCKET;
+  const accessKeyId = values.STORAGE_ACCESS_KEY_ID || values.S3_ACCESS_KEY_ID;
+  const secretAccessKey = values.STORAGE_SECRET_ACCESS_KEY || values.S3_SECRET_ACCESS_KEY;
+  if (!bucketName || !accessKeyId || !secretAccessKey) return;
+  const folder = (values.STORAGE_FOLDER || values.S3_FOLDER || "").replace(/^\/+|\/+$/g, "");
+  const key = (name: string) => (folder ? `${folder}/private-fonts/${name}` : `private-fonts/${name}`);
+  const { S3Client } = await import("bun");
+  const s3 = new S3Client({
+    bucket: bucketName,
+    region: values.STORAGE_REGION || values.S3_REGION,
+    endpoint: values.STORAGE_ENDPOINT || values.S3_ENDPOINT,
+    accessKeyId,
+    secretAccessKey,
+  });
+  try {
+    const manifest = (await s3.file(key("manifest.json")).json()) as { fonts?: string[] };
+    const names = (manifest.fonts ?? []).filter((name) => /^[a-z0-9_-]+\.(ttf|ttc|otf)$/.test(name));
+    const dir = join(process.env.HOME || "/tmp", ".local", "share", "fonts", "golden-pay");
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    await mkdir(dir, { recursive: true });
+    for (const name of names) await writeFile(join(dir, name), new Uint8Array(await s3.file(key(name)).arrayBuffer()));
+    const cache = Bun.spawnSync(["fc-cache", "-f", dir]);
+    log("info", "client fonts installed", { fonts: names.length, fc_cache: cache.exitCode });
+  } catch (error) {
+    log("warn", "client fonts not installed; reports use stand-in fonts", { error: String((error as Error).message ?? error) });
+  }
+}
+const fontsReady = installFonts();
+
 /** Waits until the Identity API reports a connected database, then starts the others. */
 async function startInternalServicesWhenReady(): Promise<void> {
+  await fontsReady;
   let lastState = "";
   while (!stopping) {
     try {

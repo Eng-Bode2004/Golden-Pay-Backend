@@ -28,3 +28,9 @@ Shared/templates/tests/visual/output/
 # Local file storage
 storage/
 Storage/
+
+# Licensed client fonts live in the private bucket (private-fonts/), never in git.
+*.ttf
+*.TTF
+*.ttc
+*.otf
