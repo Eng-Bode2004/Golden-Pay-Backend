@@ -52,7 +52,7 @@ import {
   resizePicture,
   styleText,
 } from "../Shared/templates/word.ts";
-import { renderDocxReport, SAMPLE_CONTEXT, sampleAnswers, samplePhotoBytes } from "../Shared/templates/report.ts";
+import { RENDERER_VERSION, renderDocxReport, SAMPLE_CONTEXT, sampleAnswers, samplePhotoBytes } from "../Shared/templates/report.ts";
 import { type Binding, CASE_SOURCES, scanTemplate, type Slot } from "../Shared/templates/scan.ts";
 
 type Row = Record<string, unknown>;
@@ -639,8 +639,9 @@ async function preview(version: Row, mode: "labels" | "sample" | "blank") {
 
 async function buildPreview(version: Row, mode: "labels" | "sample" | "blank"): Promise<{ bytes: Uint8Array; pages: number | null; engine: string; issues: unknown[] }> {
   const definition = version.definition as TemplateDefinition;
+  // RENDERER_VERSION: after a deploy that changes how reports are drawn, previews are built afresh.
   const key = await sha256(
-    `${mode}\n${version.layout_mode}\n${version.layout_sha256 ?? ""}\n${JSON.stringify(definition)}\n${JSON.stringify(version.bindings)}\n${String(version.client_name)}`,
+    `${RENDERER_VERSION}\n${mode}\n${version.layout_mode}\n${version.layout_sha256 ?? ""}\n${JSON.stringify(definition)}\n${JSON.stringify(version.bindings)}\n${String(version.client_name)}`,
   );
   const [cached] = await query("SELECT path, pages, engine FROM template_previews WHERE cache_key = $1", [key]);
   if (cached) {

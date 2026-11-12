@@ -3,12 +3,26 @@
  * and converts it to PDF. Used for real cases (Investigations service) and for previews
  * with sample data (Head Office template screens).
  */
+import { createHash } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { docxToPdf } from "./convert.ts";
 import { allFields, type Answers, type EvidenceContext, type FieldDef, type TemplateDefinition } from "./definition.ts";
 import { renderTemplate, type RenderIssue, type RenderImage } from "./render.ts";
 import type { Binding } from "./scan.ts";
+
+/**
+ * A short code for the report-building code itself (this folder's sources). Cached previews
+ * carry it, so after a deploy that changes how reports are drawn, previews are built afresh.
+ */
+export const RENDERER_VERSION: string = (() => {
+  const hash = createHash("sha256");
+  for (const name of readdirSync(import.meta.dir).filter((file) => /\.(ts|ps1)$/.test(file)).sort()) {
+    hash.update(name).update("|").update(readFileSync(join(import.meta.dir, name))).update("|");
+  }
+  return hash.digest("hex").slice(0, 16);
+})();
 
 export interface CaseContext {
   reference?: string | null;
