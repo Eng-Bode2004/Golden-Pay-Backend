@@ -348,11 +348,12 @@ export class TemplateRenderer {
   private setBox(mark: Mark, checked: boolean): void {
     const node = this.range(mark).find((item) => ["sdt", "r"].includes(local(item)));
     if (!node) {
-      // A small empty frame the client drew as its box (a text box, not a square shape):
-      // nothing when unchosen, a tick fitted inside it when chosen.
+      // A small empty frame the client drew as its box (a text box or table cell, not a square
+      // shape): nothing when unchosen, a tick fitted inside it when chosen.
       const name = attr(mark.start, "name");
       if (this.data.slots?.find((slot) => slot.anchor === name)?.kind === "cell") {
-        const frame = ancestor(mark.start, "txbxContent");
+        // A text box frame, or a table cell the client uses as a box («عميل جديد: [  ]»).
+        const frame = ancestor(mark.start, "txbxContent") ?? ancestor(mark.start, "tc");
         if (checked && frame) {
           const doc = frame.ownerDocument!;
           const tick = this.parseFragment(
