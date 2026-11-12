@@ -65,6 +65,8 @@ export function textOf(el: El): string {
     if (node.namespaceURI === NS.w && local(node) === "txbxContent") return;
     if (node.namespaceURI === NS.w) {
       const name = local(node);
+      // Paragraph settings hold tab stops (<w:tabs><w:tab/>): settings, not text.
+      if (name === "pPr" || name === "rPr") return;
       if (name === "t") {
         out += node.textContent ?? "";
         return;

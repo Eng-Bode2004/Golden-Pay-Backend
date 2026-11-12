@@ -278,4 +278,13 @@ describe("Alex Bank's drawn boxes", () => {
     expect(fields.map((field) => field.label)).not.toContain("لا");
     expect(fields.map((field) => field.label)).not.toContain("هل العنوان صحيح؟");
   });
+
+  test("answers never swallow the next label's first letter (tab stops are not text)", () => {
+    const scan = scanTemplate(file("Alex Bank", "استعلام عمل", "اسكندرية.docx"));
+    const answers: Answers = {};
+    for (const field of allFields(scan.definition)) if (field.type === "text" || field.type === "number") answers[field.key] = "قيمة";
+    const text = bodyText(render(scan, answers).docx);
+    for (const label of ["تاريخ بداية النشاط", "عدد العاملين", "عنوان الفرع الرئيسى"]) expect(text).toContain(label);
+    expect(text).not.toMatch(/لا\s+دة|لا\s+ة(\s|$)/);
+  });
 });

@@ -670,7 +670,8 @@ export class TemplateScanner {
     trailing = false,
     options: string[] = [],
   ): void {
-    const text = textOf(paragraph);
+    // Beside boxes, measure as markRange does: each drawn box counts as one "☐".
+    const text = afterOptions ? this.atoms(paragraph).map((atom) => atom.text).join("") : textOf(paragraph);
     pattern.lastIndex = 0;
     let matches = [...text.matchAll(pattern)];
     if (options.length) {
@@ -1191,7 +1192,10 @@ export class TemplateScanner {
     const sweep = new RegExp(`${NOT_PROVIDED.source}|لم\\s*نواف[ىقي]?|${DATE_IN_TEXT.source}`, "g");
     for (const paragraph of descendants(root, "p")) {
       if (ancestor(paragraph, "Fallback", NS.mc)) continue;
-      const text = textOf(paragraph);
+      sweep.lastIndex = 0;
+      if (!sweep.test(textOf(paragraph))) continue;
+      // Count as markRange does: a drawn box is one "☐".
+      const text = this.atoms(paragraph).map((atom) => atom.text).join("");
       sweep.lastIndex = 0;
       if (!sweep.test(text)) continue;
       // Text offsets already covered by a slot in this paragraph.
@@ -1211,7 +1215,8 @@ export class TemplateScanner {
         else if (name === "bookmarkEnd" && open.has(attr(node, "id") ?? "")) {
           covered.push([open.get(attr(node, "id") ?? "")!, offset]);
           open.delete(attr(node, "id") ?? "");
-        } else offset += name === "sdt" && descendants(node, "checkbox", NS.w14).length ? 1 : textOf(node).length;
+        } else if ((name === "sdt" && descendants(node, "checkbox", NS.w14).length) || (name === "r" && this.isBoxGraphic(node))) offset += 1;
+        else offset += textOf(node).length;
       }
       sweep.lastIndex = 0;
       const found = [...text.matchAll(sweep)]
