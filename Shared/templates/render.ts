@@ -305,7 +305,17 @@ export class TemplateRenderer {
     }
     if (!text) return; // Keep the original dots: the blank was not answered.
     const first = nodes.find((node) => isW(node, "r")) ?? nodes[0]!;
-    const runs = this.makeRuns(paragraph.ownerDocument!, text, this.runProps(first, paragraph));
+    // A blank made of spaces only («معد الاستعلام :      مراجع الاستعلام :») also keeps the
+    // next label apart: the value goes before those spaces instead of replacing them.
+    const spacesOnly =
+      nodes.every((node) => isW(node, "r") && !descendants(node, "drawing").length && !descendants(node, "object").length) &&
+      /^[\s ]+$/.test(nodes.map((node) => textOf(node)).join(""));
+    // The gap left after the value is what the spaces had room for beyond it (a letter is about
+    // two spaces wide), so the line keeps its width and its next label stays apart.
+    const gap = spacesOnly
+      ? " ".repeat(Math.max(2, Math.round(nodes.map((node) => textOf(node)).join("").length - 2 * text.length)))
+      : "";
+    const runs = this.makeRuns(paragraph.ownerDocument!, spacesOnly ? ` ${text}${gap}` : text, this.runProps(first, paragraph));
     for (const run of runs) mark.start.parentNode!.insertBefore(run, nodes[0]!);
     for (const node of nodes) remove(node);
   }

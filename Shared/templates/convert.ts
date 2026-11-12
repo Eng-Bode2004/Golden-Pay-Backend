@@ -12,6 +12,7 @@ import { existsSync } from "node:fs";
 import { cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DocxPackage, type El, descendants } from "./docx.ts";
 
 export type Engine = "libreoffice" | "word";
 
@@ -106,7 +107,7 @@ async function convert(
     await mkdir(dir, { recursive: true });
     const input = join(dir, `input.${from}`);
     const output = join(dir, `input.${to}`);
-    await writeFile(input, bytes);
+    await writeFile(input, engine === "libreoffice" && from === "docx" ? drawablePageBorders(bytes) : bytes);
     try {
       let pages: number | null = null;
       if (engine === "word") {
@@ -154,6 +155,40 @@ async function convert(
       await rm(dir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
     }
   });
+}
+
+/** Page border styles LibreOffice can draw; any other value is a Word "art" border. */
+const LINE_BORDERS = new Set([
+  "nil", "none", "single", "thick", "double", "dotted", "dashed", "dotDash", "dotDotDash", "triple",
+  "thinThickSmallGap", "thickThinSmallGap", "thinThickThinSmallGap", "thinThickMediumGap", "thickThinMediumGap",
+  "thinThickThinMediumGap", "thinThickLargeGap", "thickThinLargeGap", "thinThickThinLargeGap", "wave", "doubleWave",
+  "dashSmallGap", "dashDotStroked", "threeDEmboss", "threeDEngrave", "outset", "inset",
+]);
+
+/**
+ * Word "art" page borders (twisted lines, corner triangles…) are not drawn by LibreOffice, so
+ * the frame vanished from CIB's reports. Before converting, each one becomes a thick-thin
+ * double line in deep blue, the nearest frame LibreOffice draws. The template is untouched.
+ */
+export function drawablePageBorders(bytes: Uint8Array): Uint8Array {
+  let pkg: DocxPackage;
+  try {
+    pkg = DocxPackage.open(bytes);
+  } catch {
+    return bytes;
+  }
+  let changed = false;
+  for (const borders of descendants(pkg.xml("word/document.xml").documentElement as El, "pgBorders")) {
+    for (const side of Array.from(borders.childNodes).filter((node) => node.nodeType === 1) as El[]) {
+      const value = side.getAttribute("w:val") ?? "";
+      if (!value || LINE_BORDERS.has(value)) continue;
+      side.setAttribute("w:val", "thickThinSmallGap");
+      side.setAttribute("w:sz", "24");
+      if ((side.getAttribute("w:color") ?? "auto") === "auto") side.setAttribute("w:color", "1F3A93");
+      changed = true;
+    }
+  }
+  return changed ? pkg.save() : bytes;
 }
 
 /** Ends every process whose command line mentions `marker` (Linux; elsewhere nothing to do). */

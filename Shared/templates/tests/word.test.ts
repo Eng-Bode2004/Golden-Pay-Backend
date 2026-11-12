@@ -253,3 +253,15 @@ describe("deleting words with old form controls between them", () => {
     expect(point).toBeGreaterThan(colon);
   });
 });
+
+test("a name written into a blank of spaces keeps the next label apart (CIB staff line)", () => {
+  const cib = load("CIB Bank", "استعلام موردين", "استعلام موردين CIB.docx");
+  const staff = cib.definition.sections.flatMap((s) => s.fields).filter((f) => /معد الاستعلام|مراجع الاستعلام/.test(f.label));
+  expect(staff.length).toBe(2);
+  const answers: Answers = Object.fromEntries(staff.map((f) => [f.key, "أحمد"]));
+  const out = renderTemplate(cib.docx, cib.bindings, { definition: cib.definition, answers, caseValues: {}, images: {}, evidence: { photos: {}, locations: [] }, slots: cib.slots });
+  const line = paragraphsOf(DocxPackage.open(out.docx), PART).map((p) => textOf(p)).find((t) => t.includes("معد الاستعلام"))!;
+  // «أحمد» then a gap, never «أحمدمراجع».
+  expect(line).not.toMatch(/أحمدمراجع/);
+  expect(line).toMatch(/معد الاستعلام\s*:\s*أحمد\s{2,}مراجع الاستعلام/);
+});

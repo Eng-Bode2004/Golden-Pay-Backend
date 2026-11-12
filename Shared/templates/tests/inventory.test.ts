@@ -65,6 +65,7 @@ const EXPECTED: Record<string, [string | null, string]> = {
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir).sort()) {
+    if (name.startsWith("~$")) continue; // Word's lock file while a form is open
     const path = join(dir, name);
     if (statSync(path).isDirectory()) walk(path, out);
     else out.push(path);

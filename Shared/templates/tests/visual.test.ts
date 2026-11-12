@@ -40,6 +40,8 @@ function archive(): { id: string; key: string; path: string }[] {
   const out: { id: string; key: string; path: string }[] = [];
   const walk = (dir: string) => {
     for (const name of readdirSync(dir).sort()) {
+      // Word's lock file («~$…») while a form is open is not a form.
+      if (name.startsWith("~$")) continue;
       const path = join(dir, name);
       if (statSync(path).isDirectory()) walk(path);
       else {
