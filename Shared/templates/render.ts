@@ -83,6 +83,8 @@ interface Mark {
 }
 
 const ARABIC = /[؀-ۿ]/;
+/** A ticked box picture, swapped in for a client's box picture so the box keeps its exact size. */
+const TICKED_BOX = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAMbSURBVHhe7ZutksIwFIUrkUgkEolEIpFIJBLJGyCRPAKPgEQikUgkEolEdud0pjuXm9M2aVOmKflmzuxutn/nNJcmAZLL5ZLudrufFLwn+CVJkp9U5j0GEAP4DGA+nxu10hfBW2UA+LuvMK8xANbYV5jXGABr7CvMawyANfYV5jUGwBpD4na7pev1OhvkLJfLbIJTBPMadAAwPxwOP64fOp/PetMM5jXYAF6vVzoejw3z0GQy0ZtnMK/BBoDuro1LMZjXIAM4HA6GYanRaKR3yWBegwvger2mg8HAMC2FgBjMa1ABlNV9rtlslr7fb71rBvMaVACr1cowLIUnwuPx0Lv9w7wGE8DxeDQMa51OJ73bB8xrEAHc7/fKut9sNno3A+a18wGgnvFc14al8P+iupcwr50PAMNcbVgKPQM9xAbmtdMB2NQ9trGFee1sADZ1j97hAvPayQB81r2Eee1kAHhF14alXOpewrx2LgA8y7VhLZe6lzCvzgFgpIURWb4AgbG5L3BsNr+Xwrnrwrw6BVD0wlT3jkhQzxjH62NLYR6A+UBdmFenAMrm4E1D2G63xjGlEHzT3sa8OgVQNhPDBRYtRVVhU/dFU1wXmFenAKq6KEIoW5Rk2NQ9ep4PmFenAGzuFMxgsdKGb9S9hHl1CgBUjc2hqnl5jj63lo+6l+jz1QoAVC1MQLhzZSFkH1Ai+0n5qHsJ81orAHTdxWJhXLAWhqus+z6fz2zhUm8vhXGGb5jXWgEAm/qFptOpEYL+qIoWwkFIvmFeawcAYAwGtQEt9JZ84qLPx+T6JLFFn7txAAB3qmx8kAsh2NS96/ldYF4bBwDwYmcTQpXaqHsJ8+olAFD0RqWt2qp7CfPqLQCAENhkyUZt1b2EefUaAMB8wDWEpue0hXn1HgCwGTLnKnsryzfMaysBAJsVXdshsy+Y19YCAPv93jAtVfVWlm+Y11YDAPr4ubAA8m30tXwlAIByyB+R+NnGOWxgXr8SQFdgXmMArLGvMK8xANbYV5jXGABr7CvMawxAN/781+Z+STGAGMAuTX796/N/yMybS4xhwkEAAAAASUVORK5CYII="), (c) => c.charCodeAt(0));
 const EMU_PER_TWIP = 635;
 const CM = 360000;
 
@@ -377,7 +379,18 @@ export class TemplateRenderer {
       if (!checked) return;
       // A floating drawn box keeps its exact place: draw the tick inside it.
       if (writeInsideShape(node, "✓")) return;
-      // An inline picture of a box: show a ticked box character instead.
+      // An inline picture of a box: the same picture frame, showing a ticked box. A ☒ glyph
+      // would take a symbol font the converter may lack, and a wider fallback wraps the line.
+      const blips = [...descendants(node, "blip", NS.a), ...descendants(node, "imagedata", NS.v)];
+      if (blips.length) {
+        const rel = this.pkg.addImage(mark.part, TICKED_BOX, "png");
+        for (const blip of blips) {
+          if (local(blip) === "blip") blip.setAttributeNS(NS.r, "r:embed", rel);
+          else blip.setAttributeNS(NS.r, "r:id", rel);
+        }
+        return;
+      }
+      // Otherwise show a ticked box character instead.
       const run = wEl(doc, "r");
       const rPr = wEl(doc, "rPr");
       rPr.appendChild(wEl(doc, "rFonts", { ascii: "Segoe UI Symbol", hAnsi: "Segoe UI Symbol", cs: "Segoe UI Symbol" }));

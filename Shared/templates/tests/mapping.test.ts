@@ -169,7 +169,10 @@ describe("Gaboor home (picture checkboxes, repeating rows)", () => {
       field.type === "choice" && scan.bindings.some((b) => b.action === "check" && b.source === `answers.${field.key}`),
     )!;
     const out = render(scan, { [group.key]: group.options![0] });
-    expect(bodyText(out.docx)).toContain("☒");
+    // The box picture stays (same size, so the line never shifts) and shows a ticked box.
+    const drawings = (docx: Uint8Array) => descendants(xmlOf(docx), "drawing").length;
+    expect(drawings(out.docx)).toBe(drawings(scan.docx));
+    expect(DocxPackage.open(out.docx).has("word/media/gp-1.png")).toBe(true);
   });
 });
 
