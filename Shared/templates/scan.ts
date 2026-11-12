@@ -105,7 +105,9 @@ const GOLDEN_PAY_STAMPS = ["b0005974", "cdd1d86f", "fd9f0fa2", "891b00ab", "9124
 
 const BOX = /[☐☑☒□■▢]/;
 const BOX_G = /[☐☑☒□■▢]/g;
-const PLACEHOLDER = /[.…_ـ]{4,}|-{5,}|\(\s+\)|\(\s*[.…]{2,}\s*\)/g;
+// Tatweel («ـ») is a blank only on its own: inside a word it stretches a letter
+// («التعــامل», «السمعـــة») and must not become a place.
+const PLACEHOLDER = /[.…_]{4,}|(?<![ـؠ-ي])ـ{4,}|ـ{4,}(?![ـؠ-ي])|-{5,}|\(\s+\)|\(\s*[.…]{2,}\s*\)/g;
 /** "Not provided" left in a filled sample, e.g. Alex Bank's "لم تتم الافادة". */
 const NOT_PROVIDED = /لم\s*(تتم|يتم)\s*الاف?اد[ةه]/;
 /** Outside tables a wide gap after a colon is also a blank (drawn as a floating line). */

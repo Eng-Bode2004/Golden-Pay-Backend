@@ -42,6 +42,7 @@ import {
 import { inventoryDocx, INVESTIGATION_TYPES, type ClientProfile, type InventoryRecord } from "../Shared/templates/inventory.ts";
 import { layoutHtml } from "../Shared/templates/preview.ts";
 import {
+  deleteEmptyLines,
   deletePicture,
   editText,
   movePicture,
@@ -1342,8 +1343,14 @@ export function registerTemplateRoutes(router: Router): void {
             note = kind === "textbox" ? "حذف مربع نص" : "حذف صورة";
             break;
           }
+          case "lines.delete": {
+            // Blank lines a client's photo box kept from the old pictures.
+            const removed = deleteEmptyLines(pkg, where(), Number(body.count ?? 1));
+            note = removed === 1 ? "حذف سطر فارغ" : `حذف ${removed} سطرًا فارغًا`;
+            break;
+          }
           default:
-            throw ApiError.badRequest("op must be text, style, picture.move, picture.nudge, picture.resize or picture.delete");
+            throw ApiError.badRequest("op must be text, style, picture.move, picture.nudge, picture.resize picture.delete or lines.delete");
         }
       } catch (error) {
         if (error instanceof PlaceError) throw new ApiError(400, "EDIT_NOT_ALLOWED", error.message);

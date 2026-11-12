@@ -497,3 +497,35 @@ export function movePicture(pkg: DocxPackage, id: string, target: PlaceTarget): 
   }
   return names;
 }
+
+/**
+ * Removes `count` empty lines starting at a paragraph, like pressing Delete on blank lines in
+ * Word: a client's photo box often keeps dozens of them from the old report's pictures, which
+ * push an empty frame onto pages of its own. Only truly empty lines go: no words, places,
+ * pictures, fields or section breaks; a cell or text box always keeps its last line.
+ * Returns how many lines were removed.
+ */
+export function deleteEmptyLines(pkg: DocxPackage, target: PlaceTarget, count: number): number {
+  if (!Number.isInteger(count) || count < 1 || count > 200) throw new PlaceError("Delete between 1 and 200 lines");
+  const all = paragraphsOf(pkg, target.part);
+  paragraphAt(pkg, target);
+  const lines = all.slice(target.paragraph, target.paragraph + count);
+  if (lines.length < count) throw new PlaceError("Those lines do not exist");
+  for (const line of lines) {
+    const text = textOf(line).replace(/[​‎‏\s]/g, "");
+    const blocked = ["bookmarkStart", "drawing", "pict", "object", "fldChar", "fldSimple", "sdt", "txbxContent"].some((name) => descendants(line, name).length);
+    const pPr = child(line, "pPr");
+    if (text || blocked || (pPr && child(pPr, "sectPr"))) {
+      throw new PlaceError("Only empty lines can be deleted; one of the selected lines has text, a place or a picture");
+    }
+  }
+  let removed = 0;
+  for (const line of [...lines].reverse()) {
+    const holder = line.parentNode as El;
+    if (!holder) continue;
+    if (["tc", "txbxContent"].includes(local(holder)) && children(holder).filter((node) => local(node) === "p").length <= 1) continue;
+    remove(line);
+    removed += 1;
+  }
+  return removed;
+}

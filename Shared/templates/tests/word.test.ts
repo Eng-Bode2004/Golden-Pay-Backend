@@ -9,7 +9,7 @@ import { insertPlace, paragraphsOf, PlaceError, removePlace } from "../edit.ts";
 import { layoutHtml } from "../preview.ts";
 import { renderTemplate } from "../render.ts";
 import { scanTemplate } from "../scan.ts";
-import { deletePicture, editText, movePicture, nudgePicture, paragraphText, pictureInfo, picturesOf, resizePicture, styleText } from "../word.ts";
+import { deleteEmptyLines, deletePicture, editText, movePicture, nudgePicture, paragraphText, pictureInfo, picturesOf, resizePicture, styleText } from "../word.ts";
 
 const ARCHIVE = join(import.meta.dir, "..", "..", "..", "..", "Investigation Forms");
 const load = (...path: string[]) => scanTemplate(new Uint8Array(readFileSync(join(ARCHIVE, ...path))));
@@ -264,4 +264,33 @@ test("a name written into a blank of spaces keeps the next label apart (CIB staf
   // «أحمد» then a gap, never «أحمدمراجع».
   expect(line).not.toMatch(/أحمدمراجع/);
   expect(line).toMatch(/معد الاستعلام\s*:\s*أحمد\s{2,}مراجع الاستعلام/);
+});
+
+describe("deleting empty lines", () => {
+  const emptyRun = (pkg: DocxPackage) => {
+    const paragraphs = paragraphsOf(pkg, PART);
+    const empty = (p: El) => !textOf(p).replace(/[​\s]/g, "") && !descendants(p, "bookmarkStart").length && !descendants(p, "drawing").length && !descendants(p, "pict").length && !descendants(p, "fldChar").length && !descendants(p, "sectPr").length;
+    const index = paragraphs.findIndex((p, i) => empty(p) && paragraphs[i + 1] && empty(paragraphs[i + 1]!) && p.parentNode === paragraphs[i + 1]!.parentNode);
+    return { paragraphs, index };
+  };
+
+  test("removes blank lines and keeps every word and place", () => {
+    const pkg = DocxPackage.open(bedayty.docx);
+    const { paragraphs, index } = emptyRun(pkg);
+    expect(index).toBeGreaterThanOrEqual(0);
+    const before = textOf(pkg.xml(PART).documentElement as El);
+    const marks = descendants(pkg.xml(PART).documentElement as El, "bookmarkStart").length;
+    expect(deleteEmptyLines(pkg, { part: PART, paragraph: index, offset: 0 }, 2)).toBe(2);
+    expect(paragraphsOf(pkg, PART).length).toBe(paragraphs.length - 2);
+    expect(textOf(pkg.xml(PART).documentElement as El)).toBe(before);
+    expect(descendants(pkg.xml(PART).documentElement as El, "bookmarkStart").length).toBe(marks);
+  });
+
+  test("a line with words is refused and nothing changes", () => {
+    const pkg = DocxPackage.open(bedayty.docx);
+    const index = plainParagraph(pkg);
+    const count = paragraphsOf(pkg, PART).length;
+    expect(() => deleteEmptyLines(pkg, { part: PART, paragraph: index, offset: 0 }, 1)).toThrow(PlaceError);
+    expect(paragraphsOf(pkg, PART).length).toBe(count);
+  });
 });
