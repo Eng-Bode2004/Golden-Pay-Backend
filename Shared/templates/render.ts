@@ -348,6 +348,31 @@ export class TemplateRenderer {
   private setBox(mark: Mark, checked: boolean): void {
     const node = this.range(mark).find((item) => ["sdt", "r"].includes(local(item)));
     if (!node) {
+      // A small empty frame the client drew as its box (a text box, not a square shape):
+      // nothing when unchosen, a tick fitted inside it when chosen.
+      const name = attr(mark.start, "name");
+      if (this.data.slots?.find((slot) => slot.anchor === name)?.kind === "cell") {
+        const frame = ancestor(mark.start, "txbxContent");
+        if (checked && frame) {
+          const doc = frame.ownerDocument!;
+          const tick = this.parseFragment(
+            `<w:p xmlns:w="${NS.w}"><w:pPr><w:jc w:val="center"/><w:spacing w:before="0" w:after="0" w:line="180" w:lineRule="exact"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Segoe UI Symbol" w:hAnsi="Segoe UI Symbol" w:cs="Segoe UI Symbol"/><w:b/><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr><w:t>✓</w:t></w:r></w:p>`,
+            doc,
+          );
+          // The bookmark stays (it names the place); only the frame's text is replaced.
+          for (const paragraph of children(frame, "p")) {
+            for (const item of children(paragraph)) if (!["bookmarkStart", "bookmarkEnd", "pPr"].includes(local(item))) paragraph.removeChild(item);
+          }
+          const first = children(frame, "p")[0];
+          for (const run of children(tick, "r")) (first ?? frame).appendChild(run);
+          if (first) {
+            const props = child(first, "pPr");
+            if (props) first.replaceChild(child(tick, "pPr")!, props);
+            else first.insertBefore(child(tick, "pPr")!, first.firstChild);
+          }
+        }
+        return;
+      }
       // A box Head Office placed on the page (or moved there): draw it.
       if (this.isPoint(mark)) this.writeAt(mark, checked ? "☒" : "☐");
       return;
