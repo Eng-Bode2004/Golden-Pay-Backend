@@ -54,6 +54,11 @@ export function consumeRateLimit(
   return { remaining, resetAt: bucket.resetAt };
 }
 
+/** Forgets a counter, e.g. after a correct password: only failed attempts should add up. */
+export function clearRateLimit(key: string): void {
+  buckets.delete(key);
+}
+
 export function rateLimit(
   name: string,
   options: RateLimitOptions,

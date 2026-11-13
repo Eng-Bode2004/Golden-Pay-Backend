@@ -35,7 +35,7 @@ import {
   loginWithGoogle,
   verifyGoogleToken,
 } from "../Services/google.service.ts";
-import { consumeRateLimit, RATE_LIMITS } from "../MIddlewares/rateLimit.middleware.ts";
+import { clearRateLimit, consumeRateLimit, RATE_LIMITS } from "../MIddlewares/rateLimit.middleware.ts";
 import type { AuthContext } from "../MIddlewares/auth.middleware.ts";
 import { AREA_LEVELS, hasWorkArea, parseWorkArea, saveWorkArea, type WorkArea } from "../../Shared/work-area.ts";
 
@@ -72,8 +72,8 @@ export async function loginController(context: RequestContext): Promise<Response
     trim: false,
   });
 
-  const key = `${identifier.type}:${identifier.value}`;
-  consumeRateLimit(`auth.login.account:${key}`, RATE_LIMITS.loginByAccount);
+  const key = `auth.login.account:${identifier.type}:${identifier.value}`;
+  consumeRateLimit(key, RATE_LIMITS.loginByAccount);
 
   const result = await login(
     {
@@ -85,6 +85,10 @@ export async function loginController(context: RequestContext): Promise<Response
     },
     context,
   );
+  // The password was right: earlier tries no longer count, so signing in often (several
+  // devices, a new tab, an expired session) never locks the account. Wrong passwords
+  // still add up and lock after ten.
+  clearRateLimit(key);
 
   return ok(result);
 }
