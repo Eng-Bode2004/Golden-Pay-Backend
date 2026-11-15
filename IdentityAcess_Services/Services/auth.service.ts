@@ -27,7 +27,7 @@ import {
 } from "../Utils/files.ts";
 import { verifySignupToken, signSignupToken, type SignupTokenClaims } from "../Utils/jwt.ts";
 import UserModel, { type User } from "../Models/UserSchema.ts";
-import { DatabaseConflict } from "../Config/db.ts";
+import { DatabaseConflict, query } from "../Config/db.ts";
 import EmployeeRecordModel from "../Models/EmployeeRecordSchema.ts";
 import RefreshSessionModel from "../Models/RefreshSessionSchema.ts";
 import BiometricCredentialModel from "../Models/BiometricCredentialSchema.ts";
@@ -189,6 +189,26 @@ export function deviceMetadata(input: {
   };
 }
 
+/**
+ * Wrong passwords since the last successful sign-in, within the lock window only. An old
+ * typo from days ago no longer counts, and once a lock has run out the count starts again
+ * (before, the count only ever grew, so one slip after a lock locked the account again).
+ */
+async function recentFailedLogins(userId: string, lastLogin: Date | null, now: Date): Promise<number> {
+  const windowStart = new Date(now.getTime() - env.loginLockMinutes * 60 * 1000);
+  const since = lastLogin && lastLogin.getTime() > windowStart.getTime() ? lastLogin : windowStart;
+  try {
+    const rows = await query(
+      `SELECT count(*)::int AS n FROM audit_logs
+       WHERE user_id = $1 AND event = 'auth.login.failed' AND reason = 'invalid_password' AND created_at > $2`,
+      [userId, since],
+    );
+    return Number(rows[0]?.n ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
 export async function login(input: LoginInput, context: RequestContext): Promise<AuthResult> {
   const password = input.password;
   if (typeof password !== "string" || password.length === 0 || password.length > 128) {
@@ -242,7 +262,7 @@ export async function login(input: LoginInput, context: RequestContext): Promise
   }
 
   if (!passwordMatches) {
-    const attempts = (user.failed_login_attempts ?? 0) + 1;
+    const attempts = (await recentFailedLogins(user.user_id, user.last_login_at ?? null, now)) + 1;
     const shouldLock = attempts >= env.loginMaxAttempts;
     const lockedUntil = shouldLock
       ? new Date(now.getTime() + env.loginLockMinutes * 60 * 1000)

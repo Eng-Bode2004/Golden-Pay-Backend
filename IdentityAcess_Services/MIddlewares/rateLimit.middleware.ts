@@ -86,7 +86,8 @@ export function byIp(context: RequestContext): string {
 }
 
 export const RATE_LIMITS = {
-  loginByIp: { windowMs: 15 * 60 * 1000, max: 30, message: "Too many login attempts, try again later" },
+  // One office network is shared by many staff (admin, head office, the app): room for all of them.
+  loginByIp: { windowMs: 15 * 60 * 1000, max: 100, message: "Too many login attempts, try again later" },
   loginByAccount: {
     windowMs: 15 * 60 * 1000,
     max: 10,
