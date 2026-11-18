@@ -390,10 +390,16 @@ async function listAll(context: RequestContext): Promise<Response> {
   const rows = await query(
     `SELECT ${LIST_COLUMNS}, i.client_price::float8 AS client_price, (SELECT count(*)::int FROM investigation_recipients r
         WHERE r.investigation_id = i.investigation_id) AS recipients,
-       o.expires_at AS offer_expires_at, ou.full_name AS offered_to
+       o.expires_at AS offer_expires_at, o.offered_to, o.offered_count
      FROM investigations i LEFT JOIN users u ON u.user_id = i.assignee_id
-     LEFT JOIN investigation_offers o ON o.investigation_id = i.investigation_id AND o.response IS NULL
-     LEFT JOIN users ou ON ou.user_id = o.user_id
+     -- A case is offered to several investigators at once: one row per case.
+     LEFT JOIN LATERAL (
+       SELECT min(x.expires_at) AS expires_at, count(*)::int AS offered_count,
+         CASE WHEN count(*) = 1 THEN min(ou.full_name) ELSE count(*)::text || ' مستعلمين' END AS offered_to
+       FROM investigation_offers x JOIN users ou ON ou.user_id = x.user_id
+       WHERE x.investigation_id = i.investigation_id AND x.response IS NULL
+       HAVING count(*) > 0
+     ) o ON true
      WHERE ($1::text IS NULL OR i.status = $1)
        AND ($2::text IS NULL OR i.subject_name ILIKE '%'||$2||'%' OR i.reference ILIKE '%'||$2||'%')
      ORDER BY i.created_at DESC LIMIT 200`,
@@ -573,21 +579,34 @@ router.post(
       }
     }
     const body = await readJson(context.req).catch(() => ({}) as Row);
-    const rows = await transaction(async () => {
+    // The case went to several investigators at once: the row lock lets exactly one
+    // accept win, and everyone else's offer closes with it.
+    const { rows, closed } = await transaction(async () => {
+      const [item] = await query(
+        "SELECT status FROM investigations WHERE investigation_id=$1 FOR UPDATE",
+        [context.params.id],
+      );
+      if (!item || item.status !== "open") return { rows: [], closed: [] };
       const offer = await query(
         `UPDATE investigation_offers SET response='accepted', responded_at=now(), seen_at=COALESCE(seen_at, now())
          WHERE investigation_id=$1 AND user_id=$2 AND response IS NULL AND expires_at > now() RETURNING offer_id`,
         [context.params.id, auth.user.user_id],
       );
-      if (!offer.length) return [];
-      return query(
+      if (!offer.length) return { rows: [], closed: [] };
+      const assigned = await query(
         `UPDATE investigations SET status='assigned', assignee_id=$2, claimed_at=now(), updated_at=now()
          WHERE investigation_id=$1 AND status='open' RETURNING investigation_id`,
         [context.params.id, auth.user.user_id],
       );
+      const others = await query(
+        `UPDATE investigation_offers SET response='taken', responded_at=now()
+         WHERE investigation_id=$1 AND user_id<>$2 AND response IS NULL RETURNING user_id`,
+        [context.params.id, auth.user.user_id],
+      );
+      return { rows: assigned, closed: others };
     });
     if (!rows[0]) throw new ApiError(409, "INVESTIGATION_TAKEN", "This offer has expired or moved to another investigator");
-    await logEvent(context.params.id ?? "", "accepted", auth.user.user_id);
+    await logEvent(context.params.id ?? "", "accepted", auth.user.user_id, null, closed.length ? `${closed.length}` : null);
     await saveLocation(context.params.id ?? "", auth.user.user_id, "accepted", body);
     // Now busy: other offers this investigator holds go to someone free.
     const released = await query(
@@ -708,6 +727,37 @@ router.delete(
   }),
 );
 
+/**
+ * At the start of every visit the app takes a selfie of the investigator and photos of both
+ * sides of their own national ID; they are stored with the case under these keys.
+ */
+export const VISIT_PHOTOS = {
+  visit_selfie: "صورة شخصية للمستعلم عند الزيارة",
+  investigator_id_front: "بطاقة المستعلم — الوجه الأمامي",
+  investigator_id_back: "بطاقة المستعلم — الوجه الخلفي",
+} as const;
+/** Cases accepted before the app asked for these photos are finished without them. */
+const VISIT_PHOTOS_REQUIRED_FROM = new Date("2026-11-19T00:00:00+02:00");
+
+async function assertVisitPhotos(row: Row): Promise<void> {
+  const claimed = row.claimed_at ? new Date(row.claimed_at as string) : null;
+  if (!claimed || claimed < VISIT_PHOTOS_REQUIRED_FROM) return;
+  const present = await query(
+    "SELECT DISTINCT field_key FROM investigation_images WHERE investigation_id=$1 AND field_key = ANY($2::text[])",
+    [row.investigation_id, Object.keys(VISIT_PHOTOS)],
+  );
+  const have = new Set(present.map((image) => image.field_key as string));
+  const missing = Object.entries(VISIT_PHOTOS).filter(([key]) => !have.has(key));
+  if (missing.length) {
+    throw new ApiError(
+      400,
+      "VISIT_PHOTOS_REQUIRED",
+      "Take your selfie and both sides of your national ID before sending (update the app if it does not ask)",
+      { details: missing.map(([key, label]) => ({ field: key, message: `${label} مطلوبة` })) },
+    );
+  }
+}
+
 router.post(
   "/investigations/:id/submit",
   withAuth(async (context, auth) => {
@@ -719,6 +769,7 @@ router.post(
     // Hidden or unknown answers never reach the report.
     const answers = JSON.stringify(cleanAnswers(definition, submitted));
     const negative = body.outcome === "negative";
+    await assertVisitPhotos(row);
     let reasons: string[] = [];
     let note: string | null = null;
     if (negative) {

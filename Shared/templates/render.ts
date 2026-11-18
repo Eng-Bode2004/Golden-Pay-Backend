@@ -670,7 +670,28 @@ export class TemplateRenderer {
       (field) => field.type === "attestation" && !this.placed.has(field.key) && this.data.answers[field.key] === true &&
         !missingEvidence(field, this.data.answers, this.data.evidence).length,
     );
-    if (!extraValues.length && !extraPhotos.length && !statements.length) return;
+    // Where the investigator sent the report from: printed on every report, under the
+    // client's own layout. Never on previews with labels instead of answers.
+    const gps = this.data.preview === "labels" ? null : this.data.caseValues?.gps ?? null;
+    const gpsLine = gps
+      ? `موقع الزيارة (GPS): ⁦${gps}⁩ — https://maps.google.com/?q=${gps.replace(/\s+/g, "")}`
+      : null;
+    if (!extraValues.length && !extraPhotos.length && !statements.length) {
+      if (gpsLine) {
+        const sectPr = child(body, "sectPr");
+        const p = wEl(doc, "p");
+        const pPr = wEl(doc, "pPr");
+        pPr.appendChild(wEl(doc, "bidi"));
+        pPr.appendChild(wEl(doc, "spacing", { before: "120", after: "0" }));
+        p.appendChild(pPr);
+        const rPr = wEl(doc, "rPr");
+        rPr.appendChild(wEl(doc, "sz", { val: "18" }));
+        rPr.appendChild(wEl(doc, "szCs", { val: "18" }));
+        for (const run of this.makeRuns(doc, gpsLine, rPr)) p.appendChild(run);
+        body.insertBefore(p, sectPr ?? null);
+      }
+      return;
+    }
     for (const field of extraValues) {
       this.issues.push({ kind: "unplaced", key: field.key, label: field.label, message: `«${field.label}» ليس له مكان في نموذج العميل؛ طُبع في الملحق.` });
     }
@@ -699,6 +720,7 @@ export class TemplateRenderer {
       return p;
     };
     add(paragraph("ملحق التقرير", { bold: true, size: 30, pageBreak: true, center: true }));
+    if (gpsLine) add(paragraph(gpsLine, { size: 20 }));
     if (extraValues.length) {
       add(paragraph("بيانات إضافية", { bold: true, size: 24 }));
       const table = wEl(doc, "tbl");

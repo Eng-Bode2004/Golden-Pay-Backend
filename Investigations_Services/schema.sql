@@ -107,13 +107,16 @@ CREATE TABLE IF NOT EXISTS investigation_offers (
   expires_at timestamptz NOT NULL,
   seen_at timestamptz,
   responded_at timestamptz,
-  -- NULL while waiting; accepted, declined, expired or cancelled.
+  -- NULL while waiting; accepted, declined, expired, cancelled, or taken (another
+  -- investigator accepted first: a case is offered to everyone who covers it at once).
   response text,
   reason text
 );
 CREATE INDEX IF NOT EXISTS idx_offers_case ON investigation_offers (investigation_id, round);
 CREATE INDEX IF NOT EXISTS idx_offers_user ON investigation_offers (user_id, offered_at DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_offer_pending ON investigation_offers (investigation_id) WHERE response IS NULL;
+-- One open offer per case and investigator (a case used to go to one person at a time).
+DROP INDEX IF EXISTS uq_offer_pending;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_offer_pending_user ON investigation_offers (investigation_id, user_id) WHERE response IS NULL;
 
 -- Every step of a case, for the admin timeline and response-time analytics.
 CREATE TABLE IF NOT EXISTS investigation_events (

@@ -1,13 +1,15 @@
 import { query, transaction } from "../IdentityAcess_Services/Config/db.ts";
 import { logger } from "../IdentityAcess_Services/Utils/logger.ts";
-import { nameKey } from "../Investigators_Services/app.ts";
+import { nameKey } from "../Shared/work-area.ts";
 
 /**
- * Sends a case to one investigator at a time. Each offer lasts the type's
- * acceptance window; a refusal or timeout passes the case to the next
- * candidate. Candidates are ranked by how closely their work area matches the
- * case address — sub village, then main village, local unit, district and
- * governorate — and by GPS distance within the same level.
+ * Sends a case to every free investigator who covers it at once; the first to
+ * accept takes it and the other offers close. An area case goes to everyone in
+ * the area the admin chose. Otherwise the case goes to the closest matching
+ * level of the case address — sub village, then main village, local unit,
+ * district, governorate — and, when nobody there accepts within the type's
+ * acceptance window, to the next level out. A personal case goes to the chosen
+ * investigator first and falls back the same way.
  */
 
 const LEVELS = ["governorate", "district", "local_unit", "main_village", "sub_village"] as const;
@@ -58,8 +60,8 @@ function tierOf(item: Row, investigator: Row): number {
 
 /**
  * Candidates still waiting for a chance at this case. `busy` is true for anyone
- * working on a case or holding another offer: they are skipped for now, so work
- * spreads across free investigators, and the case is retried when they finish.
+ * working on a case: they are skipped for now and the case is retried when they
+ * finish. Holding other offers does not count: offers go to everyone at once.
  */
 async function rankCandidates(item: Row): Promise<{ user_id: string; tier: number; busy: boolean }[]> {
   const pool = item.target_mode === "area";
@@ -67,7 +69,6 @@ async function rankCandidates(item: Row): Promise<{ user_id: string; tier: numbe
     `SELECT p.*,
        EXISTS (SELECT 1 FROM investigations w WHERE w.assignee_id = p.user_id
          AND w.status IN ('assigned','in_progress','returned')) AS working,
-       EXISTS (SELECT 1 FROM investigation_offers x WHERE x.user_id = p.user_id AND x.response IS NULL) AS holding,
        (SELECT count(*)::int FROM investigations t WHERE t.assignee_id = p.user_id
          AND t.claimed_at > now() - interval '1 day') AS today
      FROM investigator_profiles p JOIN users u ON u.user_id = p.user_id
@@ -86,8 +87,8 @@ async function rankCandidates(item: Row): Promise<{ user_id: string; tier: numbe
 
   return rows
     .map((row) => {
-      // A map-drawn area already limits the pool, so everyone in it qualifies.
-      const tier = Math.max(tierOf(item, row), pool && shape && shape !== "hierarchy" ? 0.5 : 0);
+      // The admin's chosen area already limits the pool, so everyone in it qualifies.
+      const tier = Math.max(tierOf(item, row), pool ? 0.5 : 0);
       const km =
         origin && row.lat !== null ? distanceKm(origin[0]!, origin[1]!, row.lat as number, row.lng as number) : 1e6;
       return {
@@ -95,7 +96,7 @@ async function rankCandidates(item: Row): Promise<{ user_id: string; tier: numbe
         tier,
         km,
         today: row.today as number,
-        busy: Boolean(row.working || row.holding),
+        busy: Boolean(row.working),
       };
     })
     .filter((row) => row.tier > 0)
@@ -104,7 +105,19 @@ async function rankCandidates(item: Row): Promise<{ user_id: string; tier: numbe
     .map(({ user_id, tier, busy }) => ({ user_id, tier: Math.floor(tier), busy }));
 }
 
-/** Offers the case to the next candidate, or marks it unassigned. */
+/** The candidates who get the next round of offers: everyone free in the pool, else the closest level. */
+export function nextGroup(
+  ranked: { user_id: string; tier: number; busy: boolean }[],
+  pool: boolean,
+): { user_id: string; tier: number }[] {
+  const free = ranked.filter((candidate) => !candidate.busy);
+  if (!free.length) return [];
+  if (pool) return free;
+  const best = free[0]!.tier;
+  return free.filter((candidate) => candidate.tier === best);
+}
+
+/** Offers the case to the next group of candidates, or marks it unassigned. */
 export async function offerNext(investigationId: string): Promise<void> {
   await transaction(async () => {
     const [item] = await query("SELECT * FROM investigations WHERE investigation_id = $1 FOR UPDATE", [
@@ -117,18 +130,18 @@ export async function offerNext(investigationId: string): Promise<void> {
     );
     if (pending.length) return;
 
-    let next: { user_id: string; tier: number } | undefined;
+    let group: { user_id: string; tier: number }[] = [];
     if (item.preferred_id) {
       const tried = await query(
         "SELECT 1 FROM investigation_offers WHERE investigation_id=$1 AND user_id=$2 AND round=$3",
         [investigationId, item.preferred_id, item.dispatch_round],
       );
-      if (!tried.length) next = { user_id: item.preferred_id as string, tier: 6 };
+      if (!tried.length) group = [{ user_id: item.preferred_id as string, tier: 6 }];
     }
-    if (!next) {
+    if (!group.length) {
       const ranked = await rankCandidates(item);
-      next = ranked.find((candidate) => !candidate.busy);
-      if (!next && ranked.length) {
+      group = nextGroup(ranked, item.target_mode === "area");
+      if (!group.length && ranked.length) {
         // Everyone eligible is busy: wait, and retry on every dispatcher tick.
         const waiting = await query(
           "SELECT 1 FROM investigation_events WHERE investigation_id=$1 AND type='waiting' AND created_at > COALESCE((SELECT max(created_at) FROM investigation_events WHERE investigation_id=$1 AND type <> 'waiting'), 'epoch')",
@@ -139,19 +152,21 @@ export async function offerNext(investigationId: string): Promise<void> {
       }
     }
 
-    if (!next) {
+    if (!group.length) {
       await query("UPDATE investigations SET status='unassigned', updated_at=now() WHERE investigation_id=$1", [
         investigationId,
       ]);
       await logEvent(investigationId, "unassigned");
       return;
     }
-    await query(
-      `INSERT INTO investigation_offers(investigation_id,user_id,tier,round,expires_at)
-       VALUES($1,$2,$3,$4, now() + make_interval(mins => $5))`,
-      [investigationId, next.user_id, next.tier, item.dispatch_round, item.accept_minutes ?? 30],
-    );
-    await logEvent(investigationId, "offered", next.user_id, null, TIER_LABELS[next.tier] ?? null);
+    for (const next of group) {
+      await query(
+        `INSERT INTO investigation_offers(investigation_id,user_id,tier,round,expires_at)
+         VALUES($1,$2,$3,$4, now() + make_interval(mins => $5))`,
+        [investigationId, next.user_id, next.tier, item.dispatch_round, item.accept_minutes ?? 30],
+      );
+      await logEvent(investigationId, "offered", next.user_id, null, TIER_LABELS[next.tier] ?? null);
+    }
   });
 }
 

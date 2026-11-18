@@ -112,7 +112,7 @@ const RESPONSE_SQL = `
     (avg(extract(epoch FROM responded_at - offered_at) / 60)
       FILTER (WHERE response IN ('accepted','declined')))::float8 AS avg_response_minutes
   FROM investigation_offers o
-  WHERE ($2::text IS NULL OR o.user_id = $2) AND o.response IS DISTINCT FROM 'cancelled'
+  WHERE ($2::text IS NULL OR o.user_id = $2) AND (o.response IS NULL OR o.response NOT IN ('cancelled','taken'))
   GROUP BY o.user_id`;
 
 /** From first seeing an offer to submitting the report, per investigator. */
@@ -322,7 +322,7 @@ export function registerFinanceRoutes(router: Router): void {
              i.investigator_price::float8 AS investigator_price, i.due_at, i.submitted_at, i.reviewed_at, i.created_at,
              o.offered_at, o.seen_at, o.responded_at, o.response, o.reason
            FROM investigation_offers o JOIN investigations i ON i.investigation_id = o.investigation_id
-           WHERE o.user_id = $1 AND o.response IS DISTINCT FROM 'cancelled'
+           WHERE o.user_id = $1 AND (o.response IS NULL OR o.response NOT IN ('cancelled','taken'))
            ORDER BY o.offered_at DESC LIMIT 30`,
           [user],
         ),
