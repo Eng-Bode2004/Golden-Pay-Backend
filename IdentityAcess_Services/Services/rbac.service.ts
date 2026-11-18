@@ -64,6 +64,9 @@ const ROLE_DEFINITIONS: Array<{ name: RoleName; description: string; permissions
     description: "Head office: salaries, attendance, points and business results",
     permissions: [
       PERMISSIONS.HEADOFFICE_MANAGE,
+      // Head office reviews and accepts new investigators (and picks their clients).
+      PERMISSIONS.USERS_READ,
+      PERMISSIONS.USERS_APPROVE,
       PERMISSIONS.TEMPLATES_MANAGE,
       PERMISSIONS.TEMPLATES_APPROVE,
       PERMISSIONS.PRICING_MANAGE,

@@ -1,6 +1,7 @@
 import { query, transaction } from "../IdentityAcess_Services/Config/db.ts";
 import { ApiError } from "../IdentityAcess_Services/Utils/http.ts";
 import { logger } from "../IdentityAcess_Services/Utils/logger.ts";
+import { WORKS_FOR_CLIENT_SQL } from "../Shared/investigator-clients.ts";
 import { nameKey } from "../Shared/work-area.ts";
 import {
   DEFAULT_POLICY,
@@ -130,7 +131,10 @@ export async function updatePolicy(body: Row, actorId: string): Promise<Policy> 
 
 // ───────────── the pool ─────────────
 
-/** Everyone who covers the case (any matching service area, or the area pool), with their numbers. */
+/**
+ * Everyone who covers the case (any matching service area, or the area pool) and works for its
+ * client, with their numbers.
+ */
 export async function loadPool(item: Row, policy: Policy): Promise<PoolMember[]> {
   const pool = item.target_mode === "area";
   const governorate = item.governorate ? nameKey(item.governorate as string) : null;
@@ -151,11 +155,13 @@ export async function loadPool(item: Row, policy: Policy): Promise<PoolMember[]>
            'local_unit_key', a.local_unit_key, 'main_village_key', a.main_village_key, 'sub_village_key', a.sub_village_key))
          FROM investigator_service_areas a WHERE a.user_id = u.user_id AND a.active), '[]'::json) AS areas
      FROM users u LEFT JOIN investigator_profiles p ON p.user_id = u.user_id
-     WHERE u.deleted_at IS NULL AND u.phone NOT LIKE 'admin:%' AND (
+     WHERE u.deleted_at IS NULL AND u.phone NOT LIKE 'admin:%'
+       -- Only investigators who work for this case's company or bank (head office decides).
+       AND ${WORKS_FOR_CLIENT_SQL("u.user_id", "$6")} AND (
        ($3::boolean AND u.user_id IN (SELECT r.user_id FROM investigation_recipients r WHERE r.investigation_id = $1))
        OR (NOT $3::boolean AND EXISTS (SELECT 1 FROM investigator_service_areas a
          WHERE a.user_id = u.user_id AND a.active AND a.governorate_key = $5)))`,
-    [item.investigation_id, item.dispatch_round, pool, policy.window_days, governorate],
+    [item.investigation_id, item.dispatch_round, pool, policy.window_days, governorate, item.client_id ?? null],
   );
   const shape = (item.area_filter as { mode?: string } | null)?.mode;
   const origin =

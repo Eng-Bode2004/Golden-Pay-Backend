@@ -1,9 +1,11 @@
 import { join } from "node:path";
 import { query } from "../IdentityAcess_Services/Config/db.ts";
-import { withAuth, withPermission } from "../IdentityAcess_Services/MIddlewares/auth.middleware.ts";
+import { withAnyPermission, withAuth, withPermission } from "../IdentityAcess_Services/MIddlewares/auth.middleware.ts";
 import { PERMISSIONS } from "../IdentityAcess_Services/Services/rbac.service.ts";
 import { ApiError, ok, readJson, type RequestContext } from "../IdentityAcess_Services/Utils/http.ts";
 import { Router } from "../IdentityAcess_Services/Utils/router.ts";
+import { offerNext } from "../Investigations_Services/dispatch.ts";
+import { allClients, clientsOf, parseClientIds, setClientsOf, WORKS_FOR_CLIENT_SQL } from "../Shared/investigator-clients.ts";
 import { optionalNumber, optionalText, startService } from "../Shared/service.ts";
 import {
   addServiceArea,
@@ -93,10 +95,14 @@ const CANDIDATE_COLUMNS = `u.user_id, u.full_name, u.employee_number, u.phone, p
  * still gets the case (the dispatch log shows why anyone was skipped).
  */
 export async function matchInvestigators(filter: Record<string, unknown>) {
+  // With a client, only investigators who work for that company or bank.
+  const clientId = optionalText(filter.client_id, 64);
   const rows = await query(
     `SELECT ${CANDIDATE_COLUMNS} FROM investigator_profiles p JOIN users u ON u.user_id = p.user_id
      WHERE u.status = 'active' AND u.deleted_at IS NULL AND p.location_set_at IS NOT NULL
+       AND ($1::text IS NULL OR ${WORKS_FOR_CLIENT_SQL("u.user_id", "$1")})
      ORDER BY u.full_name`,
+    [clientId],
   );
   const mode = filter.mode;
 
@@ -195,7 +201,50 @@ router.patch(
       [auth.user.user_id, body.available],
     );
     if (!rows[0]) throw ApiError.badRequest("Set your work location first");
-    return ok({ profile: publicProfile(rows[0]) });
+    // Switched off: offers waiting for them go to someone else straight away.
+    let released = 0;
+    if (!body.available) {
+      const closed = await query(
+        `UPDATE investigation_offers SET response='cancelled', responded_at=now(), reason='unavailable'
+         WHERE user_id=$1 AND response IS NULL RETURNING investigation_id, round`,
+        [auth.user.user_id],
+      );
+      released = closed.length;
+      for (const offer of closed) {
+        await query(
+          `INSERT INTO dispatch_outbox(user_id, investigation_id, kind, round) VALUES($1,$2,'offer_closed',$3)
+           ON CONFLICT DO NOTHING`,
+          [auth.user.user_id, offer.investigation_id, offer.round],
+        );
+        await offerNext(offer.investigation_id as string);
+      }
+    }
+    return ok({ profile: publicProfile(rows[0]), released });
+  }),
+);
+
+/** The companies and banks an investigator works for (none chosen = all), set by head office. */
+const CLIENTS_ACCESS = [PERMISSIONS.USERS_APPROVE, PERMISSIONS.HEADOFFICE_MANAGE];
+router.get(
+  "/investigators/:user_id/clients",
+  withAnyPermission(CLIENTS_ACCESS, async (context) => {
+    const userId = context.params.user_id ?? "";
+    const [profile] = await query("SELECT available FROM investigator_profiles WHERE user_id = $1", [userId]);
+    return ok({
+      clients: await allClients(),
+      client_ids: await clientsOf(userId),
+      available: profile ? profile.available !== false : null,
+    });
+  }),
+);
+router.patch(
+  "/investigators/:user_id/clients",
+  withAnyPermission(CLIENTS_ACCESS, async (context, auth) => {
+    const userId = context.params.user_id ?? "";
+    const [user] = await query("SELECT 1 FROM users WHERE user_id = $1 AND deleted_at IS NULL", [userId]);
+    if (!user) throw ApiError.notFound("Investigator not found");
+    const ids = parseClientIds((await readJson(context.req)).client_ids) ?? [];
+    return ok({ client_ids: await setClientsOf(userId, ids, auth.user.user_id) });
   }),
 );
 

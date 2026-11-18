@@ -32,6 +32,7 @@ import {
   optionalString,
 } from "../Utils/validation.ts";
 import { ACCOUNT_STATUSES, ACCOUNT_TYPES } from "../Models/UserSchema.ts";
+import { assertClientsExist, clientsOf, parseClientIds, setClientsOf } from "../../Shared/investigator-clients.ts";
 import { listServiceAreas, readWorkArea } from "../../Shared/work-area.ts";
 
 function optionalQuery(url: URL, key: string, max = 120): string | undefined {
@@ -120,8 +121,15 @@ export async function approveUserController(
   context: RequestContext,
   auth: AuthContext,
 ): Promise<Response> {
+  const body = await readOptionalJson(context.req);
+  // Head office may choose the companies and banks the new investigator works for.
+  const clientIds = parseClientIds(body.client_ids);
+  if (clientIds) await assertClientsExist(clientIds);
   const user = await approveUser(auth.user.user_id, context.params.user_id ?? "", context);
-  return ok({ user });
+  const client_ids = clientIds
+    ? await setClientsOf(user.user_id, clientIds, auth.user.user_id)
+    : await clientsOf(user.user_id);
+  return ok({ user, client_ids });
 }
 
 export async function rejectUserController(

@@ -311,11 +311,15 @@ async function createInvestigation(context: RequestContext, auth: AuthContext): 
       INVESTIGATORS_URL,
       "/investigators/match",
       context,
-      { method: "POST", body: JSON.stringify(area ?? {}) },
+      { method: "POST", body: JSON.stringify({ ...((area as Row | null) ?? {}), client_id: template.client_id ?? null }) },
     );
     recipients = investigators.map((person) => person.user_id);
     if (!recipients.length) {
-      throw new ApiError(409, "NO_INVESTIGATORS_IN_AREA", "No available investigator works in this area");
+      throw new ApiError(
+        409,
+        "NO_INVESTIGATORS_IN_AREA",
+        "No investigator in this area works for this company or bank; head office assigns clients to investigators",
+      );
     }
   }
 

@@ -77,3 +77,15 @@ SELECT p.user_id, true, p.governorate, p.district, p.local_unit, p.main_village,
 FROM investigator_profiles p
 WHERE p.location_set_at IS NOT NULL AND p.governorate_key IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM investigator_service_areas a WHERE a.user_id = p.user_id AND a.is_primary);
+
+-- The companies and banks an investigator works for, chosen by head office (at approval or
+-- later). None chosen means every client. Dispatch only offers a case to investigators who
+-- work for its client.
+CREATE TABLE IF NOT EXISTS investigator_clients (
+  user_id text NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  client_id text NOT NULL,
+  added_by text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, client_id)
+);
+CREATE INDEX IF NOT EXISTS idx_investigator_clients_client ON investigator_clients (client_id);
