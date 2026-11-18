@@ -134,6 +134,8 @@ CREATE INDEX IF NOT EXISTS idx_events_case ON investigation_events (investigatio
 ALTER TABLE investigations ADD COLUMN IF NOT EXISTS outcome text NOT NULL DEFAULT 'positive';
 ALTER TABLE investigations ADD COLUMN IF NOT EXISTS negative_reasons jsonb;
 ALTER TABLE investigations ADD COLUMN IF NOT EXISTS negative_note text;
+-- Negative report: whom the investigator asked about the person (printed in the notes).
+ALTER TABLE investigations ADD COLUMN IF NOT EXISTS negative_asked text;
 
 -- Where the investigator was while working on a case.
 CREATE TABLE IF NOT EXISTS investigation_locations (
@@ -189,6 +191,22 @@ INSERT INTO dispatch_policy (policy_id) VALUES ('default') ON CONFLICT (policy_i
 -- Head office: minutes an investigator has, after accepting (or from the appointment, for a
 -- scheduled case), to send the report. Past it the case goes to someone else. NULL: no limit.
 ALTER TABLE dispatch_policy ADD COLUMN IF NOT EXISTS work_minutes integer;
+-- Head office: what an investigator is charged for excusing themselves from an accepted case.
+ALTER TABLE dispatch_policy ADD COLUMN IF NOT EXISTS excuse_penalty numeric(12,2) NOT NULL DEFAULT 0;
+
+-- An investigator excused themselves from a case they had accepted. Head office sees the
+-- list; the case went to the next investigator; the charge is a payroll adjustment.
+CREATE TABLE IF NOT EXISTS investigation_excuses (
+  excuse_id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  investigation_id text REFERENCES investigations(investigation_id) ON DELETE SET NULL,
+  user_id text NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  reference text,
+  reason text NOT NULL,
+  penalty numeric(12,2) NOT NULL DEFAULT 0,
+  adjustment_id text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_excuses_created ON investigation_excuses (created_at DESC);
 
 -- The assignment ledger: the source of truth for fairness. One open row per case.
 CREATE TABLE IF NOT EXISTS investigation_assignments (

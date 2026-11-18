@@ -67,6 +67,8 @@ const ROLE_DEFINITIONS: Array<{ name: RoleName; description: string; permissions
       // Head office reviews and accepts new investigators (and picks their clients).
       PERMISSIONS.USERS_READ,
       PERMISSIONS.USERS_APPROVE,
+      // and manages investigators: suspend, add, delete, reset their phone.
+      PERMISSIONS.USERS_MANAGE,
       PERMISSIONS.TEMPLATES_MANAGE,
       PERMISSIONS.TEMPLATES_APPROVE,
       PERMISSIONS.PRICING_MANAGE,

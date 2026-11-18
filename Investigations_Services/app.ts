@@ -26,8 +26,10 @@ import {
   endAssignment,
   fairnessBoard,
   loadPolicy,
-  loadWorkMinutes,
-  setWorkMinutes,
+  excuseCase,
+  listExcuses,
+  loadWorkRules,
+  setWorkRules,
   logEvent,
   offerNext,
   resumeOpenCases,
@@ -36,6 +38,7 @@ import {
   updatePolicy,
 } from "./dispatch.ts";
 import { EXCLUSION_LABELS, imbalance } from "./fairness.ts";
+import { firstPhotosKey, NEGATIVE_PHOTOS_KEY, negativeAnswers, negativeSummary } from "./negative.ts";
 import { LOCATION_KINDS, NEGATIVE_REASONS } from "./outcome.ts";
 import { renderStandardPdf } from "./pdf.ts";
 import { storeReportFile } from "./reports.ts";
@@ -188,12 +191,16 @@ async function buildReport(id: string): Promise<void> {
     let issues: unknown[] = [];
     let note: string | null = null;
 
-    if (version?.layout_mode === "docx" && version.layout_path && row.outcome !== "negative") {
+    const negative = row.outcome === "negative";
+    if (version?.layout_mode === "docx" && version.layout_path) {
       try {
         const imageBytes: Record<string, { bytes: Uint8Array }[]> = {};
+        // A negative report prints the photos of the place in the form's first photo box.
+        const placeKey = negative ? firstPhotosKey(definition) : null;
         for (const image of images) {
           const { bytes } = await readStoredFile(image.path as string);
-          (imageBytes[image.field_key as string] ??= []).push({ bytes: new Uint8Array(bytes) });
+          const key = placeKey && image.field_key === NEGATIVE_PHOTOS_KEY ? placeKey : (image.field_key as string);
+          (imageBytes[key] ??= []).push({ bytes: new Uint8Array(bytes) });
         }
         const { bytes: layoutBytes } = await readStoredFile(version.layout_path as string);
         const report = await renderDocxReport({
@@ -201,7 +208,8 @@ async function buildReport(id: string): Promise<void> {
           bindings: version.bindings as Binding[],
           slots: (version.slots as { anchor: string; kind: string }[] | null) ?? null,
           definition,
-          answers: row.answers as Record<string, unknown>,
+          // Negative: the same client form, «لم يتم التعرف عليه» and whom we asked.
+          answers: negative ? negativeAnswers(definition, row) : (row.answers as Record<string, unknown>),
           context: {
             reference: row.reference as string,
             subject_name: row.subject_name as string,
@@ -235,8 +243,6 @@ async function buildReport(id: string): Promise<void> {
         if (!(error instanceof ConverterUnavailable)) throw error;
         note = "لا يوجد محرك Word على الخادم؛ استُخدم التصميم الموحّد لجولدن باي بدلًا من تصميم العميل.";
       }
-    } else if (version?.layout_mode === "docx" && row.outcome === "negative") {
-      note = "استعلام سلبي: يُطبع بالتصميم الموحّد مع أسباب عدم العثور على الشخص.";
     }
 
     if (!pdf) {
@@ -261,7 +267,7 @@ async function buildReport(id: string): Promise<void> {
         images: images as never,
         outcome: row.outcome as string,
         negative_reasons: (row.negative_reasons as string[] | null) ?? [],
-        negative_note: row.negative_note as string | null,
+        negative_note: negative ? negativeSummary(row) : (row.negative_note as string | null),
         trail: trail as never,
         evidence,
         approved,
@@ -523,13 +529,40 @@ router.patch(
 /** Head office: how long an investigator has, after accepting, before the case moves on. */
 router.get(
   "/investigations/dispatch/work-time",
-  withPermission(PERMISSIONS.HEADOFFICE_MANAGE, async () => ok({ work_minutes: await loadWorkMinutes() })),
+  withPermission(PERMISSIONS.HEADOFFICE_MANAGE, async () => ok(await loadWorkRules())),
 );
 router.patch(
   "/investigations/dispatch/work-time",
   withPermission(PERMISSIONS.HEADOFFICE_MANAGE, async (context, auth) => {
     const body = await readJson(context.req);
-    return ok({ work_minutes: await setWorkMinutes(body.work_minutes, auth.user.user_id) });
+    const rules = await setWorkRules(body, auth.user.user_id);
+    await recordAudit({
+      event: "dispatch.work_rules.updated",
+      userId: auth.user.user_id,
+      employeeNumber: auth.user.employee_number ?? null,
+      success: true,
+      context,
+      metadata: rules as unknown as Record<string, unknown>,
+    });
+    return ok(rules);
+  }),
+);
+
+/** Head office: investigators who excused themselves from accepted cases. */
+router.get(
+  "/investigations/excuses",
+  withPermission(PERMISSIONS.HEADOFFICE_MANAGE, async () => ok({ excuses: await listExcuses() })),
+);
+
+/** The investigator excuses themselves from a case they accepted; it goes to someone else. */
+router.post(
+  "/investigations/:id/excuse",
+  withAuth(async (context, auth) => {
+    const body = await readJson(context.req);
+    const reason = optionalText(body.reason, 500);
+    if (!reason || reason.length < 5) throw ApiError.badRequest("Write the reason for your excuse", { field: "reason" });
+    const result = await excuseCase(context.params.id ?? "", auth.user.user_id, reason);
+    return ok({ status: "excused", ...result });
   }),
 );
 
@@ -881,6 +914,7 @@ router.post(
     await assertVisitPhotos(row);
     let reasons: string[] = [];
     let note: string | null = null;
+    let asked: string | null = null;
     if (negative) {
       // A negative report replaces the form: reasons from the list plus an explanation.
       reasons = Array.isArray(body.negative_reasons) ? [...new Set(body.negative_reasons.map(String))] : [];
@@ -890,6 +924,19 @@ router.post(
       note = optionalText(body.negative_note, 2000);
       if (!note || note.length < 10) {
         throw ApiError.badRequest("Explain what happened in at least 10 characters", { field: "negative_note" });
+      }
+      asked = optionalText(body.negative_asked, 500);
+      if (!asked || asked.length < 3) {
+        throw ApiError.badRequest("Write whom you asked about the person", { field: "negative_asked" });
+      }
+      const [photos] = await query(
+        "SELECT count(*)::int AS total FROM investigation_images WHERE investigation_id=$1 AND field_key=$2",
+        [row.investigation_id, NEGATIVE_PHOTOS_KEY],
+      );
+      if (!Number(photos?.total ?? 0)) {
+        throw new ApiError(400, "FORM_INCOMPLETE", "Take at least one photo of the place", {
+          details: [{ field: NEGATIVE_PHOTOS_KEY, message: "صور المكان مطلوبة" }],
+        });
       }
     } else {
       const lat = optionalNumber(body.lat, "lat");
@@ -912,7 +959,7 @@ router.post(
     await query(
       `UPDATE investigations SET answers=$2::text::jsonb, status='submitted', submitted_at=now(), submit_lat=$3,
          submit_lng=$4, review_note=NULL, outcome=$5, negative_reasons=$6::text::jsonb, negative_note=$7,
-         updated_at=now() WHERE investigation_id=$1`,
+         negative_asked=$8, updated_at=now() WHERE investigation_id=$1`,
       [
         row.investigation_id,
         answers,
@@ -921,6 +968,7 @@ router.post(
         negative ? "negative" : "positive",
         negative ? JSON.stringify(reasons) : null,
         note,
+        asked,
       ],
     );
     await recordAudit({

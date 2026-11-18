@@ -457,29 +457,135 @@ export async function resumeOpenCases(): Promise<void> {
 
 // ───────────── accepted but not done in time ─────────────
 
-/** Head office's time limit (minutes) from accepting to sending the report; null = none. */
-export async function loadWorkMinutes(): Promise<number | null> {
+export interface WorkRules {
+  /** Minutes from accepting (or the appointment) to sending the report; null = no limit. */
+  work_minutes: number | null;
+  /** What an investigator is charged for excusing themselves from an accepted case. */
+  excuse_penalty: number;
+}
+
+/** Head office's rules for accepted cases. */
+export async function loadWorkRules(): Promise<WorkRules> {
   try {
-    const [row] = await query("SELECT work_minutes FROM dispatch_policy WHERE policy_id = 'default'");
-    return row?.work_minutes === null || row?.work_minutes === undefined ? null : Number(row.work_minutes);
+    const [row] = await query("SELECT work_minutes, excuse_penalty FROM dispatch_policy WHERE policy_id = 'default'");
+    return {
+      work_minutes: row?.work_minutes === null || row?.work_minutes === undefined ? null : Number(row.work_minutes),
+      excuse_penalty: Number(row?.excuse_penalty ?? 0) || 0,
+    };
   } catch {
-    return null;
+    return { work_minutes: null, excuse_penalty: 0 };
   }
 }
 
-export async function setWorkMinutes(value: unknown, actorId: string): Promise<number | null> {
-  let minutes: number | null = null;
-  if (value !== null && value !== undefined && value !== "") {
-    minutes = Number(value);
-    if (!Number.isInteger(minutes) || minutes < 15 || minutes > 60 * 24 * 14) {
-      throw ApiError.badRequest("The time must be from 15 minutes to 14 days", { field: "work_minutes" });
+export async function loadWorkMinutes(): Promise<number | null> {
+  return (await loadWorkRules()).work_minutes;
+}
+
+export async function setWorkRules(body: Record<string, unknown>, actorId: string): Promise<WorkRules> {
+  const current = await loadWorkRules();
+  let minutes = current.work_minutes;
+  if (body.work_minutes !== undefined) {
+    minutes = null;
+    if (body.work_minutes !== null && body.work_minutes !== "") {
+      minutes = Number(body.work_minutes);
+      if (!Number.isInteger(minutes) || minutes < 15 || minutes > 60 * 24 * 14) {
+        throw ApiError.badRequest("The time must be from 15 minutes to 14 days", { field: "work_minutes" });
+      }
     }
   }
-  await query("UPDATE dispatch_policy SET work_minutes=$1, updated_by=$2, updated_at=now() WHERE policy_id='default'", [
-    minutes,
-    actorId,
-  ]);
-  return loadWorkMinutes();
+  let penalty = current.excuse_penalty;
+  if (body.excuse_penalty !== undefined) {
+    penalty = Number(body.excuse_penalty ?? 0);
+    if (!Number.isFinite(penalty) || penalty < 0 || penalty > 100_000) {
+      throw ApiError.badRequest("The amount must be from 0 to 100000", { field: "excuse_penalty" });
+    }
+    penalty = Math.round(penalty * 100) / 100;
+  }
+  await query(
+    "UPDATE dispatch_policy SET work_minutes=$1, excuse_penalty=$2, updated_by=$3, updated_at=now() WHERE policy_id='default'",
+    [minutes, penalty, actorId],
+  );
+  return loadWorkRules();
+}
+
+/**
+ * Takes an accepted case back from its investigator (the case row is locked by the caller)
+ * and reopens it for everyone else in the area: the assignment ends, the round moves on,
+ * the investigator counts as already asked, and they are told.
+ */
+async function takeBack(
+  item: Row,
+  reason: "timed_out" | "excused",
+  note: string,
+  eventNote: string | null,
+): Promise<string> {
+  const id = item.investigation_id as string;
+  const person = item.assignee_id as string;
+  await endAssignment(id, reason, null, note);
+  const [next] = await query(
+    `UPDATE investigations SET status='open', assignee_id=NULL, claimed_at=NULL, started_at=NULL,
+       dispatch_round = dispatch_round + 1, updated_at=now()
+     WHERE investigation_id=$1 RETURNING dispatch_round`,
+    [id],
+  );
+  await query(
+    `INSERT INTO investigation_offers(investigation_id, user_id, tier, round, expires_at, response, responded_at, reason)
+     VALUES($1,$2,0,$3,now(),$4,now(),$5)`,
+    [id, person, next?.dispatch_round, reason === "excused" ? "declined" : "expired", reason === "excused" ? "excused" : "work_timeout"],
+  );
+  await query(
+    `INSERT INTO dispatch_outbox(user_id, investigation_id, kind, round) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+    [person, id, reason === "excused" ? "excused" : "taken_back", next?.dispatch_round],
+  );
+  await logEvent(id, reason, person, null, eventNote);
+  return person;
+}
+
+/**
+ * The investigator excuses themselves from a case they accepted: head office is told (the
+ * excuses list), the case goes to the next investigator in the area, and head office's charge
+ * for excusing is taken from this month's pay.
+ */
+export async function excuseCase(investigationId: string, userId: string, reason: string) {
+  const rules = await loadWorkRules();
+  const result = await transaction(async () => {
+    const [item] = await query("SELECT * FROM investigations WHERE investigation_id = $1 FOR UPDATE", [investigationId]);
+    if (!item) throw ApiError.notFound("Investigation not found");
+    if (item.assignee_id !== userId || !["assigned", "in_progress", "returned"].includes(item.status as string)) {
+      throw new ApiError(409, "INVALID_STATUS_TRANSITION", "This investigation is not with you any more");
+    }
+    await takeBack(item, "excused", `اعتذار: ${reason}`, reason);
+    let adjustment: string | null = null;
+    if (rules.excuse_penalty > 0) {
+      const [row] = await query(
+        `INSERT INTO payroll_adjustments (user_id, month, amount, note)
+         VALUES ($1, date_trunc('month', now() AT TIME ZONE 'Africa/Cairo')::date, $2, $3) RETURNING adjustment_id`,
+        [userId, -rules.excuse_penalty, `خصم اعتذار عن الاستعلام ${item.reference}: ${reason}`.slice(0, 500)],
+      );
+      adjustment = (row?.adjustment_id as string) ?? null;
+    }
+    await query(
+      `INSERT INTO investigation_excuses (investigation_id, user_id, reference, reason, penalty, adjustment_id)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [investigationId, userId, item.reference, reason, rules.excuse_penalty, adjustment],
+    );
+    return { reference: item.reference as string, penalty: rules.excuse_penalty };
+  });
+  await offerNext(investigationId);
+  return result;
+}
+
+/** Recent excuses for head office, newest first. */
+export async function listExcuses(limit = 100) {
+  return query(
+    `SELECT e.excuse_id, e.investigation_id, e.reference, e.reason, e.penalty::float8 AS penalty, e.created_at,
+       u.user_id, u.full_name, u.employee_number, i.status, i.subject_name,
+       (SELECT n.full_name FROM users n WHERE n.user_id = i.assignee_id) AS now_with
+     FROM investigation_excuses e JOIN users u ON u.user_id = e.user_id
+     LEFT JOIN investigations i ON i.investigation_id = e.investigation_id
+     ORDER BY e.created_at DESC LIMIT $1`,
+    [limit],
+  );
 }
 
 /** When the investigator must have sent the report: from accepting, or from the appointment. */
@@ -511,27 +617,7 @@ export async function reclaimOverdue(): Promise<number> {
         [id, minutes],
       );
       if (!item || !item.late || !["assigned", "in_progress"].includes(item.status as string) || !item.assignee_id) return null;
-      const late = item.assignee_id as string;
-      await endAssignment(id, "timed_out", null, "لم يُنجز في الوقت المحدد");
-      const [next] = await query(
-        `UPDATE investigations SET status='open', assignee_id=NULL, claimed_at=NULL, started_at=NULL,
-           dispatch_round = dispatch_round + 1, updated_at=now()
-         WHERE investigation_id=$1 RETURNING dispatch_round`,
-        [id],
-      );
-      // Marks the late investigator as already asked this round, so the case goes to others.
-      await query(
-        `INSERT INTO investigation_offers(investigation_id, user_id, tier, round, expires_at, response, responded_at, reason)
-         VALUES($1,$2,0,$3,now(),'expired',now(),'work_timeout')`,
-        [id, late, next?.dispatch_round],
-      );
-      await query(
-        `INSERT INTO dispatch_outbox(user_id, investigation_id, kind, round) VALUES($1,$2,'taken_back',$3)
-         ON CONFLICT DO NOTHING`,
-        [late, id, next?.dispatch_round],
-      );
-      await logEvent(id, "timed_out", late, null, `${minutes}`);
-      return late;
+      return takeBack(item, "timed_out", "لم يُنجز في الوقت المحدد", `${minutes}`);
     });
     if (taken) {
       moved += 1;
@@ -564,7 +650,7 @@ export function startDispatcher(intervalMs = 15_000): void {
  */
 export async function endAssignment(
   investigationId: string,
-  reason: "completed" | "cancelled" | "reassigned" | "timed_out",
+  reason: "completed" | "cancelled" | "reassigned" | "timed_out" | "excused",
   actorId: string | null,
   note: string | null = null,
 ): Promise<void> {

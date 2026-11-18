@@ -148,6 +148,8 @@ export async function resetTestData(actorId: string): Promise<TestDataReset> {
     );
     const adjustments = await query(`DELETE FROM payroll_adjustments WHERE user_id IN (${INVESTIGATOR_IDS_SQL}) RETURNING adjustment_id`);
     const payments = await query(`DELETE FROM payroll_payments WHERE user_id IN (${INVESTIGATOR_IDS_SQL}) RETURNING user_id`);
+    // Excuses made while testing go too (their charges were payroll adjustments, removed above).
+    await query("DELETE FROM investigation_excuses").catch(() => {});
     return { points: points.length, adjustments: adjustments.length, payments: payments.length };
   });
   return {

@@ -147,6 +147,9 @@ export async function matchInvestigators(filter: Record<string, unknown>) {
 const AREA_COLUMNS = `area_id, user_id, is_primary, governorate, district, local_unit, main_village, sub_village,
   active, note, added_by, created_at`;
 
+// Admins and head office (which manages investigators) see investigators and their areas.
+const STAFF_VIEW = [PERMISSIONS.INVESTIGATIONS_MANAGE, PERMISSIONS.HEADOFFICE_MANAGE];
+
 const router = new Router();
 // Public: the signup screen lists places before the investigator has an account.
 router.get("/locations", listLocations);
@@ -250,7 +253,7 @@ router.patch(
 
 router.get(
   "/investigators",
-  withPermission(PERMISSIONS.INVESTIGATIONS_MANAGE, async (context) => {
+  withAnyPermission(STAFF_VIEW, async (context) => {
     const search = context.url.searchParams.get("search")?.trim();
     const rows = await query(
       `SELECT ${CANDIDATE_COLUMNS},
@@ -270,7 +273,7 @@ router.get(
 );
 router.get(
   "/investigators/:user_id",
-  withPermission(PERMISSIONS.INVESTIGATIONS_MANAGE, async (context) => {
+  withAnyPermission(STAFF_VIEW, async (context) => {
     const rows = await query("SELECT * FROM investigator_profiles WHERE user_id = $1", [context.params.user_id]);
     return ok({ profile: { ...publicProfile(rows[0]), areas: await listServiceAreas(context.params.user_id ?? "") } });
   }),
@@ -278,7 +281,7 @@ router.get(
 /** The areas an investigator serves; admins add extra ones (the primary follows the app). */
 router.get(
   "/investigators/:user_id/areas",
-  withPermission(PERMISSIONS.INVESTIGATIONS_MANAGE, async (context) => {
+  withAnyPermission(STAFF_VIEW, async (context) => {
     const areas = await query(
       `SELECT ${AREA_COLUMNS} FROM investigator_service_areas WHERE user_id = $1 ORDER BY is_primary DESC, created_at`,
       [context.params.user_id],
@@ -288,7 +291,7 @@ router.get(
 );
 router.post(
   "/investigators/:user_id/areas",
-  withPermission(PERMISSIONS.INVESTIGATIONS_MANAGE, async (context, auth) => {
+  withAnyPermission(STAFF_VIEW, async (context, auth) => {
     const body = await readJson(context.req);
     const [user] = await query("SELECT 1 FROM users WHERE user_id = $1 AND deleted_at IS NULL", [context.params.user_id]);
     if (!user) throw ApiError.notFound("Investigator not found");
@@ -298,7 +301,7 @@ router.post(
 );
 router.delete(
   "/investigators/:user_id/areas/:area_id",
-  withPermission(PERMISSIONS.INVESTIGATIONS_MANAGE, async (context) => {
+  withAnyPermission(STAFF_VIEW, async (context) => {
     if (!(await removeServiceArea(context.params.user_id ?? "", context.params.area_id ?? ""))) {
       throw ApiError.badRequest("Only extra areas can be removed; the investigator changes the primary one from the app");
     }

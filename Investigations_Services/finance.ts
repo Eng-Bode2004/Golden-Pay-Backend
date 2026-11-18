@@ -1,5 +1,5 @@
 import { query } from "../IdentityAcess_Services/Config/db.ts";
-import { withAuth, withPermission } from "../IdentityAcess_Services/MIddlewares/auth.middleware.ts";
+import { withAnyPermission, withAuth, withPermission } from "../IdentityAcess_Services/MIddlewares/auth.middleware.ts";
 import { recordAudit } from "../IdentityAcess_Services/Services/audit.service.ts";
 import { PERMISSIONS } from "../IdentityAcess_Services/Services/rbac.service.ts";
 import { ApiError, ok, readJson, type RequestContext } from "../IdentityAcess_Services/Utils/http.ts";
@@ -294,7 +294,7 @@ export function registerFinanceRoutes(router: Router): void {
 
   router.get(
     "/investigations/performance",
-    withPermission(PERMISSIONS.INVESTIGATIONS_MANAGE, async (context) => {
+    withAnyPermission([PERMISSIONS.INVESTIGATIONS_MANAGE, PERMISSIONS.HEADOFFICE_MANAGE], async (context) => {
       const month = monthStart(context);
       return ok({ month: month.slice(0, 7), investigators: await query(PERFORMANCE_SQL, [month, null]) });
     }),
@@ -302,7 +302,7 @@ export function registerFinanceRoutes(router: Router): void {
 
   router.get(
     "/investigations/performance/:user_id",
-    withPermission(PERMISSIONS.INVESTIGATIONS_MANAGE, async (context) => {
+    withAnyPermission([PERMISSIONS.INVESTIGATIONS_MANAGE, PERMISSIONS.HEADOFFICE_MANAGE], async (context) => {
       const month = monthStart(context);
       const user = context.params.user_id ?? "";
       const [stats, months, levels, clients, recent, responses, lifecycle] = await Promise.all([
