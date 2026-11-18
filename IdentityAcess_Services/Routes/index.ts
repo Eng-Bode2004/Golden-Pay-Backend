@@ -4,6 +4,7 @@ import { registerUserRoutes } from "./user.routes.ts";
 import { registerAdminRoutes } from "./admin.routes.ts";
 import { registerAdminSecurityRoutes } from "./admin-security.routes.ts";
 import { registerSystemRoutes } from "./system.routes.ts";
+import { registerCleanupRoutes } from "./cleanup.routes.ts";
 
 export function createRouter(): Router {
   const router = new Router();
@@ -12,5 +13,6 @@ export function createRouter(): Router {
   registerAdminRoutes(router);
   registerAdminSecurityRoutes(router);
   registerSystemRoutes(router);
+  registerCleanupRoutes(router);
   return router;
 }
