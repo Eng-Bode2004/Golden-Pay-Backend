@@ -14,6 +14,7 @@ const AUDIT_EVENTS = [
   "investigation.returned", "investigation.cancelled", "pricing.updated", "form.updated",
   "template.file_uploaded", "template.version_drafted", "template.updated", "template.returned",
   "template.approved", "template.activated",
+  "admin.investigator.deleted", "admin.test_data.reset", "admin.investigator.device_reset",
 ] as const;
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];
 export interface AuditLog {

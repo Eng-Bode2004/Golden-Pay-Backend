@@ -26,6 +26,8 @@ import {
   endAssignment,
   fairnessBoard,
   loadPolicy,
+  loadWorkMinutes,
+  setWorkMinutes,
   logEvent,
   offerNext,
   resumeOpenCases,
@@ -515,6 +517,19 @@ router.patch(
       metadata: { before, after: policy },
     });
     return ok({ policy });
+  }),
+);
+
+/** Head office: how long an investigator has, after accepting, before the case moves on. */
+router.get(
+  "/investigations/dispatch/work-time",
+  withPermission(PERMISSIONS.HEADOFFICE_MANAGE, async () => ok({ work_minutes: await loadWorkMinutes() })),
+);
+router.patch(
+  "/investigations/dispatch/work-time",
+  withPermission(PERMISSIONS.HEADOFFICE_MANAGE, async (context, auth) => {
+    const body = await readJson(context.req);
+    return ok({ work_minutes: await setWorkMinutes(body.work_minutes, auth.user.user_id) });
   }),
 );
 

@@ -4,7 +4,9 @@
 import { deleteInvestigator, previewTestDataReset, resetTestData } from "../../Shared/cleanup.ts";
 import { type AuthContext, withPermission } from "../MIddlewares/auth.middleware.ts";
 import { byIp, rateLimit, RATE_LIMITS } from "../MIddlewares/rateLimit.middleware.ts";
+import { query } from "../Config/db.ts";
 import UserModel from "../Models/UserSchema.ts";
+import { deviceOf, resetDevice } from "../Services/device-lock.service.ts";
 import { requireOwner } from "../Services/admin-security.service.ts";
 import { recordAudit } from "../Services/audit.service.ts";
 import { PERMISSIONS } from "../Services/rbac.service.ts";
@@ -73,6 +75,37 @@ export function registerCleanupRoutes(router: Router): void {
           metadata: result as unknown as Record<string, unknown>,
         });
         return ok({ removed: result });
+      }),
+    ),
+  );
+
+  /** The investigator's registered phone (or null), for the admin's investigator page. */
+  router.get(
+    "/admin/users/:user_id/device",
+    withPermission(PERMISSIONS.USERS_READ, async (context: RequestContext) =>
+      ok({ device: await deviceOf(context.params.user_id ?? "") }),
+    ),
+  );
+
+  /** A new or repaired phone: forget the old one; the next sign-in registers the new phone. */
+  router.post(
+    "/admin/users/:user_id/device/reset",
+    limit(
+      withPermission(PERMISSIONS.USERS_MANAGE, async (context: RequestContext, auth: AuthContext) => {
+        const userId = context.params.user_id ?? "";
+        const [user] = await query("SELECT 1 FROM users WHERE user_id = $1 AND deleted_at IS NULL", [userId]);
+        if (!user) throw ApiError.notFound("Investigator not found");
+        const previous = await deviceOf(userId);
+        const reset = await resetDevice(userId);
+        await recordAudit({
+          event: "admin.investigator.device_reset",
+          userId: auth.user.user_id,
+          employeeNumber: auth.user.employee_number ?? null,
+          success: true,
+          context,
+          metadata: { investigator_id: userId, previous_device: previous?.device_name ?? null },
+        });
+        return ok({ reset });
       }),
     ),
   );

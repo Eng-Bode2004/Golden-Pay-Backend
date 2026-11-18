@@ -238,3 +238,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_admin_invite_pending_email
   ON admin_invitations (lower(email))
   WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_admin_invitations_status ON admin_invitations (status, created_at DESC);
+
+-- The one phone each investigator works from: bound at signup (or the first sign-in after
+-- this was introduced). Signing in from another phone is refused until an admin resets it.
+CREATE TABLE IF NOT EXISTS investigator_devices (
+  user_id text PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+  device_id text NOT NULL,
+  device_name text,
+  platform text,
+  bound_at timestamptz NOT NULL DEFAULT now(),
+  last_seen_at timestamptz
+);

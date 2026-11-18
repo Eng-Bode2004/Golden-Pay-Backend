@@ -27,6 +27,7 @@ import {
 } from "../Services/auth.service.ts";
 import { extractBearerToken } from "../Utils/jwt.ts";
 import { deviceMetadata } from "../Services/auth.service.ts";
+import { bindSignupDevice } from "../Services/device-lock.service.ts";
 import {
   assertGoogleUnused,
   googleConfigured,
@@ -165,6 +166,7 @@ export async function signupExistingCompleteController(
   const extras = signupExtraAreas(form);
   const google = await googleForSignup(form);
   const result = await completeExistingEmployeeSignup(signupToken, form, context);
+  await bindSignupDevice(result.user_id, form.get("device_id"), form.get("device_name"), String(form.get("platform") ?? "") || null);
   if (google) await linkGoogle(result.user_id, google);
   if (area) await keepWorkArea(area, result.user_id, extras);
   return created(result);
@@ -176,6 +178,7 @@ export async function signupNewController(context: RequestContext): Promise<Resp
   const extras = signupExtraAreas(form);
   const google = await googleForSignup(form);
   const result = await signupNewInvestigator(form, context);
+  await bindSignupDevice(result.user_id, form.get("device_id"), form.get("device_name"), String(form.get("platform") ?? "") || null);
   if (google) await linkGoogle(result.user_id, google);
   if (area) await keepWorkArea(area, result.user_id, extras);
   return created(result);

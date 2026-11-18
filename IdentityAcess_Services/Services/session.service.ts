@@ -7,6 +7,7 @@ import { env } from "../Config/env.ts";
 import { hashRefreshToken, newId, randomToken } from "../Utils/crypto.ts";
 import { ApiError } from "../Utils/http.ts";
 import { signAccessToken } from "../Utils/jwt.ts";
+import { assertInvestigatorDevice } from "./device-lock.service.ts";
 
 export interface DeviceMetadata {
   deviceId?: string | null;
@@ -35,6 +36,8 @@ export async function createSession(
   authMethod: "password" | "biometric" | "google",
   metadata: DeviceMetadata,
 ): Promise<TokenBundle> {
+  // Investigators sign in only from their own phone.
+  await assertInvestigatorDevice(user.user_id, metadata);
   const sessionId = newId();
   const refreshToken = randomToken(48);
   const expiresAt = new Date(Date.now() + env.refreshTokenTtlSeconds * 1000);

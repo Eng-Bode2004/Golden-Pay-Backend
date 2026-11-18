@@ -455,9 +455,97 @@ export async function resumeOpenCases(): Promise<void> {
   for (const row of waiting) await offerNext(row.investigation_id as string);
 }
 
+// ───────────── accepted but not done in time ─────────────
+
+/** Head office's time limit (minutes) from accepting to sending the report; null = none. */
+export async function loadWorkMinutes(): Promise<number | null> {
+  try {
+    const [row] = await query("SELECT work_minutes FROM dispatch_policy WHERE policy_id = 'default'");
+    return row?.work_minutes === null || row?.work_minutes === undefined ? null : Number(row.work_minutes);
+  } catch {
+    return null;
+  }
+}
+
+export async function setWorkMinutes(value: unknown, actorId: string): Promise<number | null> {
+  let minutes: number | null = null;
+  if (value !== null && value !== undefined && value !== "") {
+    minutes = Number(value);
+    if (!Number.isInteger(minutes) || minutes < 15 || minutes > 60 * 24 * 14) {
+      throw ApiError.badRequest("The time must be from 15 minutes to 14 days", { field: "work_minutes" });
+    }
+  }
+  await query("UPDATE dispatch_policy SET work_minutes=$1, updated_by=$2, updated_at=now() WHERE policy_id='default'", [
+    minutes,
+    actorId,
+  ]);
+  return loadWorkMinutes();
+}
+
+/** When the investigator must have sent the report: from accepting, or from the appointment. */
+const DEADLINE_SQL = (minutes: string) =>
+  `(GREATEST(i.claimed_at, CASE WHEN l.delivery_hours IS NULL THEN i.due_at ELSE i.claimed_at END)
+     + make_interval(mins => ${minutes}))`;
+
+/**
+ * Cases accepted but not sent within head office's time go back to dispatch, for everyone
+ * except the investigator who held them. Returned reports (being corrected) are left alone.
+ */
+export async function reclaimOverdue(): Promise<number> {
+  const minutes = await loadWorkMinutes();
+  if (!minutes) return 0;
+  const overdue = await query(
+    `SELECT i.investigation_id FROM investigations i LEFT JOIN service_levels l ON l.code = i.service_level
+     WHERE i.status IN ('assigned','in_progress') AND i.assignee_id IS NOT NULL AND i.claimed_at IS NOT NULL
+       AND ${DEADLINE_SQL("$1")} <= now()
+     ORDER BY i.claimed_at LIMIT 50`,
+    [minutes],
+  );
+  let moved = 0;
+  for (const row of overdue) {
+    const id = row.investigation_id as string;
+    const taken = await transaction(async () => {
+      const [item] = await query(
+        `SELECT i.*, ${DEADLINE_SQL("$2")} <= now() AS late FROM investigations i
+         LEFT JOIN service_levels l ON l.code = i.service_level WHERE i.investigation_id = $1 FOR UPDATE OF i`,
+        [id, minutes],
+      );
+      if (!item || !item.late || !["assigned", "in_progress"].includes(item.status as string) || !item.assignee_id) return null;
+      const late = item.assignee_id as string;
+      await endAssignment(id, "timed_out", null, "لم يُنجز في الوقت المحدد");
+      const [next] = await query(
+        `UPDATE investigations SET status='open', assignee_id=NULL, claimed_at=NULL, started_at=NULL,
+           dispatch_round = dispatch_round + 1, updated_at=now()
+         WHERE investigation_id=$1 RETURNING dispatch_round`,
+        [id],
+      );
+      // Marks the late investigator as already asked this round, so the case goes to others.
+      await query(
+        `INSERT INTO investigation_offers(investigation_id, user_id, tier, round, expires_at, response, responded_at, reason)
+         VALUES($1,$2,0,$3,now(),'expired',now(),'work_timeout')`,
+        [id, late, next?.dispatch_round],
+      );
+      await query(
+        `INSERT INTO dispatch_outbox(user_id, investigation_id, kind, round) VALUES($1,$2,'taken_back',$3)
+         ON CONFLICT DO NOTHING`,
+        [late, id, next?.dispatch_round],
+      );
+      await logEvent(id, "timed_out", late, null, `${minutes}`);
+      return late;
+    });
+    if (taken) {
+      moved += 1;
+      logger.info("dispatch.reclaimed", { investigation_id: id, user_id: taken });
+      await offerNext(id);
+    }
+  }
+  return moved;
+}
+
 export function startDispatcher(intervalMs = 15_000): void {
   const tick = async () => {
     try {
+      await reclaimOverdue();
       await expireOffers();
       await resumeOpenCases();
     } catch (error) {
@@ -476,7 +564,7 @@ export function startDispatcher(intervalMs = 15_000): void {
  */
 export async function endAssignment(
   investigationId: string,
-  reason: "completed" | "cancelled" | "reassigned",
+  reason: "completed" | "cancelled" | "reassigned" | "timed_out",
   actorId: string | null,
   note: string | null = null,
 ): Promise<void> {

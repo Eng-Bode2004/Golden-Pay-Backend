@@ -186,6 +186,9 @@ CREATE TABLE IF NOT EXISTS dispatch_policy (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO dispatch_policy (policy_id) VALUES ('default') ON CONFLICT (policy_id) DO NOTHING;
+-- Head office: minutes an investigator has, after accepting (or from the appointment, for a
+-- scheduled case), to send the report. Past it the case goes to someone else. NULL: no limit.
+ALTER TABLE dispatch_policy ADD COLUMN IF NOT EXISTS work_minutes integer;
 
 -- The assignment ledger: the source of truth for fairness. One open row per case.
 CREATE TABLE IF NOT EXISTS investigation_assignments (
