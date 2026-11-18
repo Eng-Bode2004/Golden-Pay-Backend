@@ -141,3 +141,83 @@ export async function readWorkArea(userId: string) {
     return null;
   }
 }
+
+// ───────────── several areas per investigator ─────────────
+
+/** How many extra areas one investigator may serve (besides the primary one). */
+export const MAX_EXTRA_AREAS = 10;
+
+const SERVICE_AREA_COLUMNS = `area_id, is_primary, governorate, district, local_unit, main_village, sub_village, note,
+  created_at`;
+
+/** Every active area the investigator serves, the primary one first. */
+export async function listServiceAreas(userId: string): Promise<Record<string, unknown>[]> {
+  try {
+    return await query(
+      `SELECT ${SERVICE_AREA_COLUMNS} FROM investigator_service_areas
+       WHERE user_id = $1 AND active ORDER BY is_primary DESC, created_at`,
+      [userId],
+    );
+  } catch {
+    // The investigators service creates the table; before it first runs there are none.
+    return [];
+  }
+}
+
+/**
+ * Adds an extra area the investigator serves (signup, the app, or an admin). The same area
+ * twice is ignored, so overlapping choices never produce duplicate offers.
+ */
+export async function addServiceArea(area: WorkArea, userId: string, addedBy: string | null, note: string | null = null) {
+  const { names } = area;
+  const keys = AREA_LEVELS.map((level) => (names[level] ? nameKey(names[level] as string) : null));
+  const existing = await query(
+    `SELECT area_id FROM investigator_service_areas
+     WHERE user_id = $1 AND active AND governorate_key = $2 AND district_key IS NOT DISTINCT FROM $3
+       AND local_unit_key IS NOT DISTINCT FROM $4 AND main_village_key IS NOT DISTINCT FROM $5
+       AND sub_village_key IS NOT DISTINCT FROM $6`,
+    [userId, ...keys],
+  );
+  if (existing[0]) return listServiceAreas(userId);
+  const [count] = await query(
+    "SELECT count(*)::int AS n FROM investigator_service_areas WHERE user_id = $1 AND active AND NOT is_primary",
+    [userId],
+  );
+  if (Number(count?.n ?? 0) >= MAX_EXTRA_AREAS) {
+    throw ApiError.badRequest(`You can serve at most ${MAX_EXTRA_AREAS} extra areas`);
+  }
+  await transaction(async () => {
+    await rememberPath(names, userId);
+    await query(
+      `INSERT INTO investigator_service_areas (user_id, is_primary, governorate, district, local_unit, main_village,
+         sub_village, governorate_key, district_key, local_unit_key, main_village_key, sub_village_key, added_by, note)
+       VALUES ($1, false, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [userId, ...AREA_LEVELS.map((level) => names[level]), ...keys, addedBy, note],
+    );
+  });
+  return listServiceAreas(userId);
+}
+
+/** Stops serving an extra area. The primary area is changed, never removed. */
+export async function removeServiceArea(userId: string, areaId: string): Promise<boolean> {
+  const rows = await query(
+    `UPDATE investigator_service_areas SET active = false, updated_at = now()
+     WHERE area_id = $1 AND user_id = $2 AND NOT is_primary AND active RETURNING area_id`,
+    [areaId, userId],
+  );
+  return rows.length > 0;
+}
+
+/** Extra areas sent with a signup (a JSON list), checked before anything is stored. */
+export function parseExtraAreas(value: unknown): WorkArea[] {
+  if (value === undefined || value === null || value === "") return [];
+  let list: unknown;
+  try {
+    list = typeof value === "string" ? JSON.parse(value) : value;
+  } catch {
+    throw ApiError.badRequest("extra_areas must be a list of areas");
+  }
+  if (!Array.isArray(list)) throw ApiError.badRequest("extra_areas must be a list of areas");
+  if (list.length > MAX_EXTRA_AREAS) throw ApiError.badRequest(`You can serve at most ${MAX_EXTRA_AREAS} extra areas`);
+  return list.map((item) => parseWorkArea((item ?? {}) as Record<string, unknown>));
+}

@@ -37,7 +37,15 @@ import {
 } from "../Services/google.service.ts";
 import { clearRateLimit, consumeRateLimit, RATE_LIMITS } from "../MIddlewares/rateLimit.middleware.ts";
 import type { AuthContext } from "../MIddlewares/auth.middleware.ts";
-import { AREA_LEVELS, hasWorkArea, parseWorkArea, saveWorkArea, type WorkArea } from "../../Shared/work-area.ts";
+import {
+  addServiceArea,
+  AREA_LEVELS,
+  hasWorkArea,
+  parseExtraAreas,
+  parseWorkArea,
+  saveWorkArea,
+  type WorkArea,
+} from "../../Shared/work-area.ts";
 
 /**
  * The work area an investigator picked while signing up (checked before the account is made,
@@ -53,10 +61,16 @@ function signupWorkArea(form: FormData): WorkArea | null {
   return hasWorkArea(body) ? parseWorkArea(body) : null;
 }
 
+/** Other areas the investigator covers, sent as a JSON list (checked before the account is made). */
+function signupExtraAreas(form: FormData): WorkArea[] {
+  return parseExtraAreas(form.get("extra_areas"));
+}
+
 /** The account already exists: a failed save is logged, and the app asks again after login. */
-async function keepWorkArea(area: WorkArea, userId: string): Promise<void> {
+async function keepWorkArea(area: WorkArea, userId: string, extras: WorkArea[] = []): Promise<void> {
   try {
     await saveWorkArea(area, userId);
+    for (const extra of extras) await addServiceArea(extra, userId, userId);
   } catch (error) {
     console.error("[signup] work area not saved", { userId, error: error instanceof Error ? error.message : String(error) });
   }
@@ -148,20 +162,22 @@ export async function signupExistingCompleteController(
 
   const form = await readFormData(context.req);
   const area = signupWorkArea(form);
+  const extras = signupExtraAreas(form);
   const google = await googleForSignup(form);
   const result = await completeExistingEmployeeSignup(signupToken, form, context);
   if (google) await linkGoogle(result.user_id, google);
-  if (area) await keepWorkArea(area, result.user_id);
+  if (area) await keepWorkArea(area, result.user_id, extras);
   return created(result);
 }
 
 export async function signupNewController(context: RequestContext): Promise<Response> {
   const form = await readFormData(context.req);
   const area = signupWorkArea(form);
+  const extras = signupExtraAreas(form);
   const google = await googleForSignup(form);
   const result = await signupNewInvestigator(form, context);
   if (google) await linkGoogle(result.user_id, google);
-  if (area) await keepWorkArea(area, result.user_id);
+  if (area) await keepWorkArea(area, result.user_id, extras);
   return created(result);
 }
 

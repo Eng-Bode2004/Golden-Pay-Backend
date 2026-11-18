@@ -32,7 +32,7 @@ import {
   optionalString,
 } from "../Utils/validation.ts";
 import { ACCOUNT_STATUSES, ACCOUNT_TYPES } from "../Models/UserSchema.ts";
-import { readWorkArea } from "../../Shared/work-area.ts";
+import { listServiceAreas, readWorkArea } from "../../Shared/work-area.ts";
 
 function optionalQuery(url: URL, key: string, max = 120): string | undefined {
   const value = url.searchParams.get(key)?.trim();
@@ -108,7 +108,12 @@ export async function getUserDetailController(
   const userId = context.params.user_id;
   const result = await getUserDetail(userId ?? "");
   // The area the investigator said they cover, chosen at signup (null when not chosen yet).
-  return ok({ ...result, work_area: await readWorkArea(userId ?? "") });
+  // Every area they serve (the primary one first), for the admin to see before activating.
+  return ok({
+    ...result,
+    work_area: await readWorkArea(userId ?? ""),
+    service_areas: await listServiceAreas(userId ?? ""),
+  });
 }
 
 export async function approveUserController(

@@ -5,7 +5,17 @@ import { PERMISSIONS } from "../IdentityAcess_Services/Services/rbac.service.ts"
 import { ApiError, ok, readJson, type RequestContext } from "../IdentityAcess_Services/Utils/http.ts";
 import { Router } from "../IdentityAcess_Services/Utils/router.ts";
 import { optionalNumber, optionalText, startService } from "../Shared/service.ts";
-import { AREA_LEVELS, type AreaLevel, nameKey, parseWorkArea, publicWorkProfile, saveWorkArea } from "../Shared/work-area.ts";
+import {
+  addServiceArea,
+  AREA_LEVELS,
+  type AreaLevel,
+  listServiceAreas,
+  nameKey,
+  parseWorkArea,
+  publicWorkProfile,
+  removeServiceArea,
+  saveWorkArea,
+} from "../Shared/work-area.ts";
 
 export { nameKey };
 
@@ -139,7 +149,34 @@ router.get(
   "/investigators/me",
   withAuth(async (_context, auth) => {
     const rows = await query("SELECT * FROM investigator_profiles WHERE user_id = $1", [auth.user.user_id]);
-    return ok({ profile: publicProfile(rows[0]) });
+    return ok({ profile: { ...publicProfile(rows[0]), areas: await listServiceAreas(auth.user.user_id) } });
+  }),
+);
+
+/** The areas the signed-in investigator serves: the primary one plus any extra ones. */
+router.get(
+  "/investigators/me/areas",
+  withAuth(async (_context, auth) => ok({ areas: await listServiceAreas(auth.user.user_id) })),
+);
+router.post(
+  "/investigators/me/areas",
+  withAuth(async (context, auth) => {
+    const [profile] = await query(
+      "SELECT 1 FROM investigator_profiles WHERE user_id = $1 AND location_set_at IS NOT NULL",
+      [auth.user.user_id],
+    );
+    if (!profile) throw ApiError.badRequest("Set your main work area first");
+    const areas = await addServiceArea(parseWorkArea(await readJson(context.req)), auth.user.user_id, auth.user.user_id);
+    return ok({ areas });
+  }),
+);
+router.delete(
+  "/investigators/me/areas/:area_id",
+  withAuth(async (context, auth) => {
+    if (!(await removeServiceArea(auth.user.user_id, context.params.area_id ?? ""))) {
+      throw ApiError.badRequest("Only extra areas can be removed; change your main area instead");
+    }
+    return ok({ areas: await listServiceAreas(auth.user.user_id) });
   }),
 );
 router.patch(
@@ -167,7 +204,12 @@ router.get(
   withPermission(PERMISSIONS.INVESTIGATIONS_MANAGE, async (context) => {
     const search = context.url.searchParams.get("search")?.trim();
     const rows = await query(
-      `SELECT ${CANDIDATE_COLUMNS} FROM users u
+      `SELECT ${CANDIDATE_COLUMNS},
+         (SELECT count(*)::int FROM investigator_service_areas a WHERE a.user_id = u.user_id AND a.active) AS areas_count,
+         (SELECT string_agg(concat_ws(' - ', a.governorate, a.district, a.local_unit, a.main_village, a.sub_village), ' | '
+            ORDER BY a.is_primary DESC, a.created_at)
+          FROM investigator_service_areas a WHERE a.user_id = u.user_id AND a.active) AS areas_label
+       FROM users u
        LEFT JOIN investigator_profiles p ON p.user_id = u.user_id
        WHERE u.status = 'active' AND u.deleted_at IS NULL AND u.phone NOT LIKE 'admin:%'
          AND ($1::text IS NULL OR u.full_name ILIKE '%' || $1 || '%' OR u.employee_number ILIKE '%' || $1 || '%')
@@ -181,7 +223,7 @@ router.get(
   "/investigators/:user_id",
   withPermission(PERMISSIONS.INVESTIGATIONS_MANAGE, async (context) => {
     const rows = await query("SELECT * FROM investigator_profiles WHERE user_id = $1", [context.params.user_id]);
-    return ok({ profile: publicProfile(rows[0]) });
+    return ok({ profile: { ...publicProfile(rows[0]), areas: await listServiceAreas(context.params.user_id ?? "") } });
   }),
 );
 /** The areas an investigator serves; admins add extra ones (the primary follows the app). */
@@ -199,34 +241,18 @@ router.post(
   "/investigators/:user_id/areas",
   withPermission(PERMISSIONS.INVESTIGATIONS_MANAGE, async (context, auth) => {
     const body = await readJson(context.req);
-    const area = parseWorkArea(body);
     const [user] = await query("SELECT 1 FROM users WHERE user_id = $1 AND deleted_at IS NULL", [context.params.user_id]);
     if (!user) throw ApiError.notFound("Investigator not found");
-    const names = area.names;
-    const [row] = await query(
-      `INSERT INTO investigator_service_areas (user_id, is_primary, governorate, district, local_unit, main_village,
-         sub_village, governorate_key, district_key, local_unit_key, main_village_key, sub_village_key, added_by, note)
-       VALUES ($1, false, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING ${AREA_COLUMNS}`,
-      [
-        context.params.user_id,
-        ...LEVELS.map((level) => names[level]),
-        ...LEVELS.map((level) => (names[level] ? nameKey(names[level] as string) : null)),
-        auth.user.user_id,
-        optionalText(body.note, 300),
-      ],
-    );
-    return ok({ area: row });
+    const areas = await addServiceArea(parseWorkArea(body), context.params.user_id ?? "", auth.user.user_id, optionalText(body.note, 300));
+    return ok({ areas });
   }),
 );
 router.delete(
   "/investigators/:user_id/areas/:area_id",
   withPermission(PERMISSIONS.INVESTIGATIONS_MANAGE, async (context) => {
-    const rows = await query(
-      `UPDATE investigator_service_areas SET active = false, updated_at = now()
-       WHERE area_id = $1 AND user_id = $2 AND NOT is_primary RETURNING area_id`,
-      [context.params.area_id, context.params.user_id],
-    );
-    if (!rows.length) throw ApiError.badRequest("Only extra areas can be removed; the investigator changes the primary one from the app");
+    if (!(await removeServiceArea(context.params.user_id ?? "", context.params.area_id ?? ""))) {
+      throw ApiError.badRequest("Only extra areas can be removed; the investigator changes the primary one from the app");
+    }
     return ok({ removed: true });
   }),
 );
