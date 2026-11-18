@@ -1,3 +1,4 @@
+import { notify } from "../Shared/notifications.ts";
 import { join } from "node:path";
 import { query, transaction } from "../IdentityAcess_Services/Config/db.ts";
 import { withAuth, type AuthContext } from "../IdentityAcess_Services/MIddlewares/auth.middleware.ts";
@@ -215,6 +216,14 @@ router.post(
       throw ApiError.badRequest("Unknown status", { field: "status" });
     }
     const fromOffice = office && !own;
+    if (fromOffice) {
+      void notify(complaint.user_id as string, {
+        kind: "complaint_reply",
+        title: "ردّت الإدارة العليا على رسالتك",
+        body: text.length > 140 ? `${text.slice(0, 140)}…` : text,
+        data: { complaint_id: complaint.complaint_id },
+      });
+    }
     await query("INSERT INTO complaint_messages(complaint_id,author_id,from_office,body) VALUES($1,$2,$3,$4)", [
       complaint.complaint_id,
       auth.user.user_id,
@@ -473,6 +482,11 @@ router.post(
       ]);
     }
     await audit(context, auth, "headoffice.points.given", person.user_id as string, { color, count, note });
+    await notify(person.user_id as string, {
+      kind: "points",
+      title: color === "blue" ? `حصلت على ${count === 1 ? "نقطة زرقاء" : `${count} نقاط زرقاء`}` : `سُجّلت عليك ${count === 1 ? "نقطة سوداء" : `${count} نقاط سوداء`}`,
+      body: note,
+    });
     return created({ given: count });
   }),
 );
@@ -537,6 +551,11 @@ router.post(
       auth.user.user_id,
     ]);
     await audit(context, auth, "headoffice.payroll.adjusted", person.user_id as string, { month, amount, note });
+    await notify(person.user_id as string, {
+      kind: "payroll_adjusted",
+      title: amount > 0 ? "أُضيف مبلغ إلى مستحقاتك" : "خُصم مبلغ من مستحقاتك",
+      body: `${Math.abs(amount).toLocaleString("ar-EG")} ج.م — ${note}`,
+    });
     return created({ saved: true });
   }),
 );
@@ -576,6 +595,13 @@ router.post(
       );
     }
     await audit(context, auth, "headoffice.payroll.paid", null, { month, people: people.length });
+    for (const person of people) {
+      await notify(person.user_id, {
+        kind: "payroll_paid",
+        title: "صُرفت مستحقاتك",
+        body: `صُرفت مستحقات شهر ${month.slice(0, 7)}: ${Number(person.pay.total).toLocaleString("ar-EG")} ج.م.`,
+      });
+    }
     return ok({ paid: people.length });
   }),
 );

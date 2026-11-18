@@ -38,11 +38,12 @@ import {
   updatePolicy,
 } from "./dispatch.ts";
 import { EXCLUSION_LABELS, imbalance } from "./fairness.ts";
+import { notify } from "../Shared/notifications.ts";
 import { firstPhotosKey, NEGATIVE_PHOTOS_KEY, negativeAnswers, negativeSummary } from "./negative.ts";
 import { LOCATION_KINDS, NEGATIVE_REASONS } from "./outcome.ts";
 import { renderStandardPdf } from "./pdf.ts";
 import { storeReportFile } from "./reports.ts";
-import { ConverterUnavailable } from "../Shared/templates/convert.ts";
+import { ConverterUnavailable, countPdfPages, docxToPdf } from "../Shared/templates/convert.ts";
 import {
   allFields,
   cleanAnswers,
@@ -277,7 +278,8 @@ async function buildReport(id: string): Promise<void> {
     const docxPath = docx ? await storeReportFile(id, "report.docx", docx) : null;
     await query(
       `UPDATE investigations SET pdf_status='ready', pdf_path=$2, report_docx_path=$3, report_layout=$4, report_engine=$5,
-         report_pages=$6, report_issues=$7::text::jsonb, report_error=$8, report_built_at=now() WHERE investigation_id=$1`,
+         report_pages=$6, report_issues=$7::text::jsonb, report_error=$8, report_built_at=now(),
+         report_edited_at=NULL, report_edited_by=NULL, report_edited_note=NULL WHERE investigation_id=$1`,
       [id, path, docxPath, layout, engine, pages, JSON.stringify(issues), note],
     );
   } catch (error) {
@@ -959,7 +961,7 @@ router.post(
     await query(
       `UPDATE investigations SET answers=$2::text::jsonb, status='submitted', submitted_at=now(), submit_lat=$3,
          submit_lng=$4, review_note=NULL, outcome=$5, negative_reasons=$6::text::jsonb, negative_note=$7,
-         negative_asked=$8, updated_at=now() WHERE investigation_id=$1`,
+         negative_asked=$8, report_edited_at=NULL, updated_at=now() WHERE investigation_id=$1`,
       [
         row.investigation_id,
         answers,
@@ -1051,11 +1053,84 @@ router.get(
       report_issues: row.report_issues ?? [],
       report_layout: row.report_layout,
       report_error: row.report_error,
+      has_docx: Boolean(row.report_docx_path),
+      edited: row.report_edited_at
+        ? {
+            at: row.report_edited_at,
+            note: row.report_edited_note ?? null,
+            by: ((await query("SELECT full_name FROM users WHERE user_id=$1", [row.report_edited_by]))[0]?.full_name as string) ?? null,
+          }
+        : null,
       template: version
         ? { ...version, matches: !row.template_hash || row.template_hash === version.content_hash }
         : { version_no: null, layout_mode: "standard", title: row.form_title, matches: true },
       evidence: { photos: evidence.photos, locations: evidence.locations.length },
     });
+  }),
+);
+
+/**
+ * The admin replaces the report with an edited file: a Word file (turned into the PDF too)
+ * or a PDF (the Word version is then dropped, it would no longer match).
+ */
+router.post(
+  "/investigations/:id/report",
+  withPermission(MANAGE, async (context, auth) => {
+    const row = await findCase(context.params.id);
+    if (!row.submitted_at) throw ApiError.badRequest("This investigation has not been submitted");
+    const form = await readFormData(context.req);
+    const file = form.get("file");
+    if (!(file instanceof File) || !file.size) throw ApiError.badRequest("Choose the edited PDF or Word file", { field: "file" });
+    if (file.size > 25 * 1024 * 1024) throw ApiError.badRequest("The file must be at most 25 MB", { field: "file" });
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const head = String.fromCharCode(...bytes.slice(0, 4));
+    const isPdf = head === "%PDF";
+    const isDocx = head.startsWith("PK") && /\.docx$/i.test(file.name || ".docx");
+    if (!isPdf && !isDocx) throw ApiError.badRequest("Upload a PDF or a Word (.docx) file", { field: "file" });
+    const note = optionalText(form.get("note"), 500);
+    const stamp = Date.now();
+    let pdf: Uint8Array;
+    let docxPath: string | null = null;
+    let pages: number | null = null;
+    let engine = "upload";
+    if (isDocx) {
+      try {
+        const converted = await docxToPdf(bytes);
+        pdf = converted.bytes;
+        pages = converted.pages;
+        engine = converted.engine;
+      } catch (error) {
+        if (error instanceof ConverterUnavailable) {
+          throw new ApiError(503, "CONVERTER_UNAVAILABLE", "Word files cannot be turned into PDF on the server right now; upload the PDF instead");
+        }
+        throw error;
+      }
+      docxPath = await storeReportFile(row.investigation_id as string, `report-edited-${stamp}.docx`, bytes);
+    } else {
+      pdf = bytes;
+      try {
+        pages = countPdfPages(bytes);
+      } catch {
+        pages = null;
+      }
+    }
+    const pdfPath = await storeReportFile(row.investigation_id as string, `report-edited-${stamp}.pdf`, pdf);
+    await query(
+      `UPDATE investigations SET pdf_status='ready', pdf_path=$2, report_docx_path=$3, report_pages=$4, report_engine=$5,
+         report_error=NULL, report_edited_at=now(), report_edited_by=$6, report_edited_note=$7, updated_at=now()
+       WHERE investigation_id=$1`,
+      [row.investigation_id, pdfPath, docxPath, pages, engine, auth.user.user_id, note],
+    );
+    await logEvent(row.investigation_id as string, "report_edited", null, auth.user.user_id, note ?? (isPdf ? "PDF" : "Word"));
+    await recordAudit({
+      event: "investigation.report_edited",
+      userId: auth.user.user_id,
+      employeeNumber: auth.user.employee_number ?? null,
+      success: true,
+      context,
+      metadata: { reference: row.reference, kind: isPdf ? "pdf" : "docx", note },
+    });
+    return ok({ pdf_status: "ready", kind: isPdf ? "pdf" : "docx" });
   }),
 );
 
@@ -1078,7 +1153,7 @@ function reviewRoute(path: string, status: string, event: string, from: string[]
       const rows = await query(
         `UPDATE investigations SET status=$2, review_note=$3, reviewed_at=now(), reviewed_by=$4, updated_at=now(),
            return_count = return_count + CASE WHEN $2 = 'returned' THEN 1 ELSE 0 END
-         WHERE investigation_id=$1 AND status = ANY($5::text[]) RETURNING reference`,
+         WHERE investigation_id=$1 AND status = ANY($5::text[]) RETURNING reference, assignee_id`,
         [context.params.id, status, note, auth.user.user_id, `{${from.join(",")}}`],
       );
       if (!rows[0]) throw new ApiError(409, "INVALID_STATUS_TRANSITION", "This action is not available now");
@@ -1090,8 +1165,23 @@ function reviewRoute(path: string, status: string, event: string, from: string[]
         metadata: { reference: rows[0].reference },
       });
       await logEvent(context.params.id ?? "", status, null, auth.user.user_id, note);
+      const told = {
+        approved: { title: "اعتُمد تقريرك", body: `اعتمدت الإدارة تقرير الاستعلام ${rows[0].reference}.` },
+        returned: { title: "أُعيد إليك تقرير للتعديل", body: `${rows[0].reference}: ${note ?? "راجع ملاحظة المراجع"}` },
+        cancelled: { title: "أُلغي استعلام", body: `ألغت الإدارة الاستعلام ${rows[0].reference}.` },
+      }[status];
+      if (told && rows[0].assignee_id) {
+        await notify(rows[0].assignee_id as string, {
+          kind: status as "approved" | "returned" | "cancelled",
+          ...told,
+          investigation_id: context.params.id ?? null,
+        });
+      }
       // The approved report carries the reviewer's name and the Golden Pay stamp.
-      if (status === "approved") void buildReport(context.params.id ?? "");
+      if (status === "approved") {
+        const [edited] = await query("SELECT report_edited_at FROM investigations WHERE investigation_id=$1", [context.params.id]);
+        if (!edited?.report_edited_at) void buildReport(context.params.id ?? "");
+      }
       // The fairness ledger: an approved case is completed work; a cancelled one stops
       // counting only if the investigator had not started it.
       if (status === "approved") await endAssignment(context.params.id ?? "", "completed", auth.user.user_id);

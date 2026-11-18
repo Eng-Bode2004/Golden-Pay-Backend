@@ -166,6 +166,11 @@ ALTER TABLE investigations ADD COLUMN IF NOT EXISTS report_issues jsonb;
 ALTER TABLE investigations ADD COLUMN IF NOT EXISTS report_docx_path text;
 ALTER TABLE investigations ADD COLUMN IF NOT EXISTS report_error text;
 ALTER TABLE investigations ADD COLUMN IF NOT EXISTS report_built_at timestamptz;
+-- An admin replaced the report with an edited PDF or Word file. Automatic rebuilds (e.g. on
+-- approval) keep it; a new submission or an explicit rebuild from the answers replaces it.
+ALTER TABLE investigations ADD COLUMN IF NOT EXISTS report_edited_at timestamptz;
+ALTER TABLE investigations ADD COLUMN IF NOT EXISTS report_edited_by text;
+ALTER TABLE investigations ADD COLUMN IF NOT EXISTS report_edited_note text;
 
 -- ───────────── Fairness-aware broadcast dispatch (docs/dispatch-fairness.md) ─────────────
 

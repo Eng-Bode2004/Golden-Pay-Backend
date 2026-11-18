@@ -32,6 +32,7 @@ import {
   optionalString,
 } from "../Utils/validation.ts";
 import { ACCOUNT_STATUSES, ACCOUNT_TYPES } from "../Models/UserSchema.ts";
+import { notify } from "../../Shared/notifications.ts";
 import { assertClientsExist, clientsOf, parseClientIds, setClientsOf } from "../../Shared/investigator-clients.ts";
 import { listServiceAreas, readWorkArea } from "../../Shared/work-area.ts";
 
@@ -129,6 +130,11 @@ export async function approveUserController(
   const client_ids = clientIds
     ? await setClientsOf(user.user_id, clientIds, auth.user.user_id)
     : await clientsOf(user.user_id);
+  await notify(user.user_id, {
+    kind: "account_approved",
+    title: "تم تفعيل حسابك",
+    body: "مرحبًا بك في جولدن باي. يمكنك الآن استقبال الاستعلامات.",
+  });
   return ok({ user, client_ids });
 }
 

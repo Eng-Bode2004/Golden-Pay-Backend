@@ -2,6 +2,7 @@ import { query, transaction } from "../IdentityAcess_Services/Config/db.ts";
 import { ApiError } from "../IdentityAcess_Services/Utils/http.ts";
 import { logger } from "../IdentityAcess_Services/Utils/logger.ts";
 import { WORKS_FOR_CLIENT_SQL } from "../Shared/investigator-clients.ts";
+import { notify } from "../Shared/notifications.ts";
 import { nameKey } from "../Shared/work-area.ts";
 import {
   DEFAULT_POLICY,
@@ -248,6 +249,12 @@ async function issueOffers(item: Row, userIds: string[], tier: number, minutes: 
       JSON.stringify({ reference: item.reference, expires_at: created[0]?.expires_at, service: item.service_name }),
     ],
   );
+  await notify(offered, {
+    kind: "offer",
+    title: "استعلام جديد متاح لك",
+    body: `${item.reference} · ${[item.district, item.governorate].filter(Boolean).join(" - ") || item.address}. أول من يقبل يأخذه.`,
+    investigation_id: item.investigation_id as string,
+  });
 }
 
 /** Offers the case to the next group of candidates, or escalates it. Safe to call any time. */
@@ -538,6 +545,15 @@ async function takeBack(
     [person, id, reason === "excused" ? "excused" : "taken_back", next?.dispatch_round],
   );
   await logEvent(id, reason, person, null, eventNote);
+  await notify(person, {
+    kind: reason === "excused" ? "excused" : "taken_back",
+    title: reason === "excused" ? "تم تسجيل اعتذارك" : "سُحب منك الاستعلام",
+    body:
+      reason === "excused"
+        ? `أُرسل الاستعلام ${item.reference} لمستعلم آخر.`
+        : `انتهت مهلة إنجاز الاستعلام ${item.reference}، فأُرسل لمستعلم آخر.`,
+    investigation_id: id,
+  });
   return person;
 }
 
@@ -721,6 +737,20 @@ export async function assignManually(
       [investigationId, userId, status],
     );
     await logEvent(investigationId, previous ? "reassigned" : "manually_assigned", userId, actorId, reason);
+    await notify(userId, {
+      kind: "assigned",
+      title: "أُسند إليك استعلام",
+      body: `${item.reference} · ${item.subject_name}`,
+      investigation_id: investigationId,
+    });
+    if (previous) {
+      await notify(previous, {
+        kind: "taken_back",
+        title: "نُقل الاستعلام لمستعلم آخر",
+        body: `نقلت الإدارة الاستعلام ${item.reference}.`,
+        investigation_id: investigationId,
+      });
+    }
     return { status, previous };
   });
 }

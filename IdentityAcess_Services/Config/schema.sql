@@ -249,3 +249,31 @@ CREATE TABLE IF NOT EXISTS investigator_devices (
   bound_at timestamptz NOT NULL DEFAULT now(),
   last_seen_at timestamptz
 );
+
+-- Everything people are told: the app's notifications list, and what is pushed to phones.
+CREATE TABLE IF NOT EXISTS notifications (
+  notification_id bigserial PRIMARY KEY,
+  user_id text NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  kind text NOT NULL,
+  title text NOT NULL,
+  body text NOT NULL,
+  investigation_id text,
+  data jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  read_at timestamptz,
+  -- sent | no_device | skipped (push not set up) | failed; NULL while sending
+  push_status text
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications (user_id, notification_id DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications (user_id) WHERE read_at IS NULL;
+
+-- Firebase Cloud Messaging tokens of the phones signed in to each account.
+CREATE TABLE IF NOT EXISTS push_tokens (
+  token text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  platform text,
+  device_id text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  last_seen_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_push_tokens_user ON push_tokens (user_id);
