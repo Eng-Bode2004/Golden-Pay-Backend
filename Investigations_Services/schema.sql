@@ -164,3 +164,87 @@ ALTER TABLE investigations ADD COLUMN IF NOT EXISTS report_issues jsonb;
 ALTER TABLE investigations ADD COLUMN IF NOT EXISTS report_docx_path text;
 ALTER TABLE investigations ADD COLUMN IF NOT EXISTS report_error text;
 ALTER TABLE investigations ADD COLUMN IF NOT EXISTS report_built_at timestamptz;
+
+-- ───────────── Fairness-aware broadcast dispatch (docs/dispatch-fairness.md) ─────────────
+
+-- One policy row. engine: fair_broadcast (default) | sequential (the old one-at-a-time) |
+-- shadow (runs sequential, records what fair_broadcast would have offered).
+CREATE TABLE IF NOT EXISTS dispatch_policy (
+  policy_id text PRIMARY KEY,
+  engine text NOT NULL DEFAULT 'fair_broadcast',
+  -- assignments: successful assignments in the window; hybrid: plus weighted active cases.
+  score_mode text NOT NULL DEFAULT 'assignments',
+  window_days integer NOT NULL DEFAULT 30,
+  active_weight numeric(6,2) NOT NULL DEFAULT 1,
+  -- NULL: each investigation type's acceptance window.
+  offer_minutes integer,
+  -- Investigators with this many active cases get no new offers.
+  max_active integer NOT NULL DEFAULT 1,
+  manual_counts boolean NOT NULL DEFAULT true,
+  newcomer_boost boolean NOT NULL DEFAULT true,
+  updated_by text,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO dispatch_policy (policy_id) VALUES ('default') ON CONFLICT (policy_id) DO NOTHING;
+
+-- The assignment ledger: the source of truth for fairness. One open row per case.
+CREATE TABLE IF NOT EXISTS investigation_assignments (
+  assignment_id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  investigation_id text NOT NULL REFERENCES investigations(investigation_id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(user_id),
+  -- accepted | preferred | manual | backfill
+  source text NOT NULL,
+  offer_id text,
+  counts boolean NOT NULL DEFAULT true,
+  assigned_at timestamptz NOT NULL DEFAULT now(),
+  assigned_by text,
+  ended_at timestamptz,
+  -- completed | cancelled | reassigned
+  end_reason text,
+  ended_by text,
+  note text
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_assignment_open ON investigation_assignments (investigation_id) WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_assignments_user ON investigation_assignments (user_id, assigned_at DESC);
+
+-- Existing assignments enter the ledger once; nothing about the cases changes.
+INSERT INTO investigation_assignments (investigation_id, user_id, source, counts, assigned_at, ended_at, end_reason)
+SELECT i.investigation_id, i.assignee_id, 'backfill', true, COALESCE(i.claimed_at, i.created_at),
+  CASE WHEN i.status IN ('approved','cancelled') THEN COALESCE(i.reviewed_at, i.updated_at) END,
+  CASE WHEN i.status = 'approved' THEN 'completed' WHEN i.status = 'cancelled' THEN 'cancelled' END
+FROM investigations i
+WHERE i.assignee_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM investigation_assignments a WHERE a.investigation_id = i.investigation_id);
+
+-- Every dispatch decision, so admins can see why someone was or was not offered a case.
+CREATE TABLE IF NOT EXISTS dispatch_attempts (
+  attempt_id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  investigation_id text NOT NULL REFERENCES investigations(investigation_id) ON DELETE CASCADE,
+  round integer NOT NULL,
+  engine text NOT NULL,
+  shadow boolean NOT NULL DEFAULT false,
+  tier integer,
+  min_score numeric(10,2),
+  pool_size integer NOT NULL DEFAULT 0,
+  offered jsonb NOT NULL DEFAULT '[]',
+  eligible jsonb NOT NULL DEFAULT '[]',
+  excluded jsonb NOT NULL DEFAULT '[]',
+  outcome text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_dispatch_attempts_case ON dispatch_attempts (investigation_id, created_at);
+
+-- Notifications to deliver (the app reads them; push can deliver the same rows later).
+CREATE TABLE IF NOT EXISTS dispatch_outbox (
+  outbox_id bigserial PRIMARY KEY,
+  user_id text NOT NULL REFERENCES users(user_id),
+  investigation_id text NOT NULL REFERENCES investigations(investigation_id) ON DELETE CASCADE,
+  -- offer | offer_closed
+  kind text NOT NULL,
+  round integer NOT NULL DEFAULT 1,
+  payload jsonb NOT NULL DEFAULT '{}',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  delivered_at timestamptz
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_outbox_once ON dispatch_outbox (investigation_id, user_id, kind, round);
+CREATE INDEX IF NOT EXISTS idx_outbox_user ON dispatch_outbox (user_id, outbox_id);

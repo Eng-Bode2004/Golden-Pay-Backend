@@ -17,7 +17,22 @@ import { ApiError, created, ok, readFormData, readJson, type RequestContext } fr
 import { Router } from "../IdentityAcess_Services/Utils/router.ts";
 import { optionalNumber, optionalText, requiredText, startService } from "../Shared/service.ts";
 import { findServiceLevel, registerFinanceRoutes, seedServiceLevels } from "./finance.ts";
-import { logEvent, offerNext, resumeOpenCases, startDispatcher, TIER_LABELS } from "./dispatch.ts";
+import {
+  acceptOffer,
+  assignManually,
+  declineOffer,
+  dispatchMetrics,
+  endAssignment,
+  fairnessBoard,
+  loadPolicy,
+  logEvent,
+  offerNext,
+  resumeOpenCases,
+  startDispatcher,
+  TIER_LABELS,
+  updatePolicy,
+} from "./dispatch.ts";
+import { EXCLUSION_LABELS, imbalance } from "./fairness.ts";
 import { LOCATION_KINDS, NEGATIVE_REASONS } from "./outcome.ts";
 import { renderStandardPdf } from "./pdf.ts";
 import { storeReportFile } from "./reports.ts";
@@ -452,6 +467,69 @@ registerFinanceRoutes(router);
 router.get("/investigations", withPermission(MANAGE, listAll));
 router.post("/investigations", withPermission(MANAGE, createInvestigation));
 
+// ───────────── dispatch & fairness (docs/dispatch-fairness.md) ─────────────
+
+router.get(
+  "/investigations/dispatch/overview",
+  withPermission(MANAGE, async () => {
+    const policy = await loadPolicy();
+    const [board, metrics, waiting] = await Promise.all([
+      fairnessBoard(policy),
+      dispatchMetrics(),
+      query(
+        `SELECT i.investigation_id, i.reference, i.status, i.subject_name, i.governorate, i.district, i.created_at,
+           i.due_at, i.dispatch_round,
+           (SELECT count(*)::int FROM investigation_offers o WHERE o.investigation_id = i.investigation_id AND o.response IS NULL) AS open_offers,
+           (SELECT min(o.expires_at) FROM investigation_offers o WHERE o.investigation_id = i.investigation_id AND o.response IS NULL) AS expires_at,
+           (SELECT d.outcome FROM dispatch_attempts d WHERE d.investigation_id = i.investigation_id AND NOT d.shadow
+             ORDER BY d.created_at DESC LIMIT 1) AS last_outcome
+         FROM investigations i WHERE i.status IN ('open','unassigned') ORDER BY i.created_at LIMIT 200`,
+      ),
+    ]);
+    const eligibleScores = board
+      .filter((row) => row.status === "active" && row.available)
+      .map((row) => Number(row.score));
+    return ok({ policy, investigators: board, metrics, waiting, imbalance: imbalance(eligibleScores), exclusion_labels: EXCLUSION_LABELS });
+  }),
+);
+
+router.patch(
+  "/investigations/dispatch/policy",
+  withPermission(MANAGE, async (context, auth) => {
+    const before = await loadPolicy();
+    const policy = await updatePolicy(await readJson(context.req), auth.user.user_id);
+    await recordAudit({
+      event: "dispatch.policy_updated" as never,
+      actorId: auth.user.user_id,
+      success: true,
+      context,
+      metadata: { before, after: policy },
+    });
+    return ok({ policy });
+  }),
+);
+
+/** New offers and closed offers for the signed-in investigator, each delivered once. */
+router.get(
+  "/investigations/feed",
+  withAuth(async (context, auth) => {
+    const after = Number(context.url.searchParams.get("after") ?? 0) || 0;
+    const rows = await query(
+      `SELECT x.outbox_id, x.kind, x.investigation_id, x.payload, x.created_at, i.reference, i.status
+       FROM dispatch_outbox x JOIN investigations i ON i.investigation_id = x.investigation_id
+       WHERE x.user_id = $1 AND x.outbox_id > $2 ORDER BY x.outbox_id LIMIT 100`,
+      [auth.user.user_id, after],
+    );
+    if (rows.length) {
+      await query(
+        "UPDATE dispatch_outbox SET delivered_at = COALESCE(delivered_at, now()) WHERE user_id = $1 AND outbox_id = ANY($2::bigint[])",
+        [auth.user.user_id, rows.map((row) => row.outbox_id)],
+      );
+    }
+    return ok({ items: rows, last: rows.length ? rows[rows.length - 1]!.outbox_id : after });
+  }),
+);
+
 router.get(
   "/investigations/:id",
   withAuth(async (context, auth) => {
@@ -527,17 +605,61 @@ router.post(
   "/investigations/:id/decline",
   withAuth(async (context, auth) => {
     const body = await readJson(context.req).catch(() => ({}) as Row);
-    const reason = optionalText(body.reason, 300);
-    const rows = await query(
-      `UPDATE investigation_offers SET response='declined', responded_at=now(), reason=$3,
-         seen_at=COALESCE(seen_at, now())
-       WHERE investigation_id=$1 AND user_id=$2 AND response IS NULL RETURNING offer_id`,
-      [context.params.id, auth.user.user_id, reason],
-    );
-    if (!rows.length) throw new ApiError(409, "OFFER_CLOSED", "This offer is no longer open");
-    await logEvent(context.params.id ?? "", "declined", auth.user.user_id, null, reason);
-    await offerNext(context.params.id ?? "");
+    await declineOffer(context.params.id ?? "", auth.user.user_id, optionalText(body.reason, 300));
     return ok({ declined: true });
+  }),
+);
+
+/** Why the case went to whom: every dispatch decision with scores and exclusions. */
+router.get(
+  "/investigations/:id/dispatch",
+  withPermission(MANAGE, async (context) => {
+    const row = await findCase(context.params.id);
+    const [attempts, ledger] = await Promise.all([
+      query(
+        `SELECT attempt_id, round, engine, shadow, tier, min_score::float8 AS min_score, pool_size, offered, eligible,
+           excluded, outcome, created_at
+         FROM dispatch_attempts WHERE investigation_id = $1 ORDER BY created_at`,
+        [row.investigation_id],
+      ),
+      query(
+        `SELECT a.source, a.counts, a.assigned_at, a.ended_at, a.end_reason, a.note, u.full_name,
+           b.full_name AS assigned_by_name, e.full_name AS ended_by_name
+         FROM investigation_assignments a JOIN users u ON u.user_id = a.user_id
+         LEFT JOIN users b ON b.user_id = a.assigned_by LEFT JOIN users e ON e.user_id = a.ended_by
+         WHERE a.investigation_id = $1 ORDER BY a.assigned_at`,
+        [row.investigation_id],
+      ),
+    ]);
+    const ids = new Set<string>();
+    for (const attempt of attempts) {
+      for (const list of [attempt.offered, attempt.eligible, attempt.excluded] as unknown[]) {
+        for (const entry of (list as (string | { user_id: string })[]) ?? []) ids.add(typeof entry === "string" ? entry : entry.user_id);
+      }
+    }
+    const names = ids.size
+      ? await query("SELECT user_id, full_name, employee_number FROM users WHERE user_id = ANY($1::text[])", [[...ids]])
+      : [];
+    return ok({ attempts, ledger, names: Object.fromEntries(names.map((user) => [user.user_id, user])), exclusion_labels: EXCLUSION_LABELS });
+  }),
+);
+
+/** Manual assignment or reassignment, with a reason that is kept on the case. */
+router.post(
+  "/investigations/:id/assign",
+  withPermission(MANAGE, async (context, auth) => {
+    const body = await readJson(context.req);
+    const userId = requiredText(body.user_id, "user_id", 64);
+    const reason = requiredText(body.reason, "reason", 500);
+    const result = await assignManually(context.params.id ?? "", userId, auth.user.user_id, reason);
+    await recordAudit({
+      event: (result.previous ? "investigation.reassigned" : "investigation.assigned") as never,
+      actorId: auth.user.user_id,
+      success: true,
+      context,
+      metadata: { investigation_id: context.params.id, to: userId, from: result.previous, reason },
+    });
+    return ok(result);
   }),
 );
 
@@ -563,66 +685,29 @@ router.post(
 router.post(
   "/investigations/:id/claim",
   withAuth(async (context, auth) => {
-    const [pending] = await query(
-      "SELECT tier FROM investigation_offers WHERE investigation_id=$1 AND user_id=$2 AND response IS NULL",
-      [context.params.id, auth.user.user_id],
-    );
-    if (pending && pending.tier !== 6) {
-      const working = await query(
-        "SELECT reference FROM investigations WHERE assignee_id=$1 AND status IN ('assigned','in_progress','returned') LIMIT 1",
-        [auth.user.user_id],
-      );
-      if (working.length) {
-        throw new ApiError(409, "INVESTIGATOR_BUSY", "Finish your current investigation before accepting another", {
-          details: { reference: working[0]!.reference },
-        });
-      }
-    }
+    const id = context.params.id ?? "";
     const body = await readJson(context.req).catch(() => ({}) as Row);
-    // The case went to several investigators at once: the row lock lets exactly one
-    // accept win, and everyone else's offer closes with it.
-    const { rows, closed } = await transaction(async () => {
-      const [item] = await query(
-        "SELECT status FROM investigations WHERE investigation_id=$1 FOR UPDATE",
-        [context.params.id],
-      );
-      if (!item || item.status !== "open") return { rows: [], closed: [] };
-      const offer = await query(
-        `UPDATE investigation_offers SET response='accepted', responded_at=now(), seen_at=COALESCE(seen_at, now())
-         WHERE investigation_id=$1 AND user_id=$2 AND response IS NULL AND expires_at > now() RETURNING offer_id`,
-        [context.params.id, auth.user.user_id],
-      );
-      if (!offer.length) return { rows: [], closed: [] };
-      const assigned = await query(
-        `UPDATE investigations SET status='assigned', assignee_id=$2, claimed_at=now(), updated_at=now()
-         WHERE investigation_id=$1 AND status='open' RETURNING investigation_id`,
-        [context.params.id, auth.user.user_id],
-      );
-      const others = await query(
-        `UPDATE investigation_offers SET response='taken', responded_at=now()
-         WHERE investigation_id=$1 AND user_id<>$2 AND response IS NULL RETURNING user_id`,
-        [context.params.id, auth.user.user_id],
-      );
-      return { rows: assigned, closed: others };
-    });
-    if (!rows[0]) throw new ApiError(409, "INVESTIGATION_TAKEN", "This offer has expired or moved to another investigator");
-    await logEvent(context.params.id ?? "", "accepted", auth.user.user_id, null, closed.length ? `${closed.length}` : null);
-    await saveLocation(context.params.id ?? "", auth.user.user_id, "accepted", body);
-    // Now busy: other offers this investigator holds go to someone free.
-    const released = await query(
-      `UPDATE investigation_offers SET response='cancelled', responded_at=now()
-       WHERE user_id=$1 AND response IS NULL AND tier <> 6 AND investigation_id <> $2 RETURNING investigation_id`,
-      [auth.user.user_id, context.params.id],
-    );
-    for (const offer of released) await offerNext(offer.investigation_id as string);
-    await recordAudit({
-      event: "investigation.claimed",
-      userId: auth.user.user_id,
-      success: true,
-      context,
-      metadata: { investigation_id: context.params.id },
-    });
-    return ok({ investigation_id: rows[0].investigation_id, status: "assigned" });
+    let result;
+    try {
+      // One transaction: exactly one investigator wins; repeating the request is harmless.
+      result = await acceptOffer(id, auth.user.user_id);
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "INVESTIGATION_TAKEN") {
+        await logEvent(id, "accept_conflict", auth.user.user_id).catch(() => {});
+      }
+      throw error;
+    }
+    if (!result.repeated) {
+      await saveLocation(id, auth.user.user_id, "accepted", body);
+      await recordAudit({
+        event: "investigation.claimed",
+        userId: auth.user.user_id,
+        success: true,
+        context,
+        metadata: { investigation_id: id },
+      });
+    }
+    return ok({ investigation_id: result.investigation_id, status: result.status, repeated: result.repeated });
   }),
 );
 
@@ -935,6 +1020,10 @@ function reviewRoute(path: string, status: string, event: string, from: string[]
       await logEvent(context.params.id ?? "", status, null, auth.user.user_id, note);
       // The approved report carries the reviewer's name and the Golden Pay stamp.
       if (status === "approved") void buildReport(context.params.id ?? "");
+      // The fairness ledger: an approved case is completed work; a cancelled one stops
+      // counting only if the investigator had not started it.
+      if (status === "approved") await endAssignment(context.params.id ?? "", "completed", auth.user.user_id);
+      if (status === "cancelled") await endAssignment(context.params.id ?? "", "cancelled", auth.user.user_id, note);
       if (status === "cancelled") {
         await query(
           "UPDATE investigation_offers SET response='cancelled', responded_at=now() WHERE investigation_id=$1 AND response IS NULL",

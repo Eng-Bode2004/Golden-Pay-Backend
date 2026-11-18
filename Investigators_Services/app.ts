@@ -77,11 +77,15 @@ function insidePolygon(lat: number, lng: number, points: number[][]): boolean {
 const CANDIDATE_COLUMNS = `u.user_id, u.full_name, u.employee_number, u.phone, p.governorate, p.district,
   p.local_unit, p.main_village, p.sub_village, p.street, p.lat, p.lng, p.available, p.location_set_at`;
 
-/** Active investigators inside a named area or a shape drawn on the map. */
+/**
+ * Active investigators inside a named area or a shape drawn on the map. Availability is not
+ * a filter here: it is checked at every dispatch step, so someone who switches back on later
+ * still gets the case (the dispatch log shows why anyone was skipped).
+ */
 export async function matchInvestigators(filter: Record<string, unknown>) {
   const rows = await query(
     `SELECT ${CANDIDATE_COLUMNS} FROM investigator_profiles p JOIN users u ON u.user_id = p.user_id
-     WHERE u.status = 'active' AND u.deleted_at IS NULL AND p.available AND p.location_set_at IS NOT NULL
+     WHERE u.status = 'active' AND u.deleted_at IS NULL AND p.location_set_at IS NOT NULL
      ORDER BY u.full_name`,
   );
   const mode = filter.mode;
@@ -110,14 +114,22 @@ export async function matchInvestigators(filter: Record<string, unknown>) {
     (entry): entry is readonly [Level, string] => Boolean(entry[1]),
   );
   if (!wanted.length) throw ApiError.badRequest("Choose at least a governorate");
+  // Any of the investigator's service areas may match (registered coverage, never live GPS).
   const keyed = await query(
-    `SELECT user_id, ${LEVELS.map((level) => `${level}_key`).join(",")} FROM investigator_profiles`,
+    `SELECT user_id, ${LEVELS.map((level) => `${level}_key`).join(",")} FROM investigator_service_areas
+     WHERE active AND governorate_key = $1`,
+    [nameKey(wanted.find(([level]) => level === "governorate")?.[1] ?? wanted[0]![1])],
   );
-  const keys = new Map(keyed.map((row) => [row.user_id, row]));
-  return rows.filter((row) =>
-    wanted.every(([level, value]) => keys.get(row.user_id)?.[`${level}_key`] === nameKey(value)),
+  const matching = new Set(
+    keyed
+      .filter((area) => wanted.every(([level, value]) => area[`${level}_key`] === nameKey(value)))
+      .map((area) => area.user_id as string),
   );
+  return rows.filter((row) => matching.has(row.user_id as string));
 }
+
+const AREA_COLUMNS = `area_id, user_id, is_primary, governorate, district, local_unit, main_village, sub_village,
+  active, note, added_by, created_at`;
 
 const router = new Router();
 // Public: the signup screen lists places before the investigator has an account.
@@ -172,6 +184,53 @@ router.get(
     return ok({ profile: publicProfile(rows[0]) });
   }),
 );
+/** The areas an investigator serves; admins add extra ones (the primary follows the app). */
+router.get(
+  "/investigators/:user_id/areas",
+  withPermission(PERMISSIONS.INVESTIGATIONS_MANAGE, async (context) => {
+    const areas = await query(
+      `SELECT ${AREA_COLUMNS} FROM investigator_service_areas WHERE user_id = $1 ORDER BY is_primary DESC, created_at`,
+      [context.params.user_id],
+    );
+    return ok({ areas });
+  }),
+);
+router.post(
+  "/investigators/:user_id/areas",
+  withPermission(PERMISSIONS.INVESTIGATIONS_MANAGE, async (context, auth) => {
+    const body = await readJson(context.req);
+    const area = parseWorkArea(body);
+    const [user] = await query("SELECT 1 FROM users WHERE user_id = $1 AND deleted_at IS NULL", [context.params.user_id]);
+    if (!user) throw ApiError.notFound("Investigator not found");
+    const names = area.names;
+    const [row] = await query(
+      `INSERT INTO investigator_service_areas (user_id, is_primary, governorate, district, local_unit, main_village,
+         sub_village, governorate_key, district_key, local_unit_key, main_village_key, sub_village_key, added_by, note)
+       VALUES ($1, false, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING ${AREA_COLUMNS}`,
+      [
+        context.params.user_id,
+        ...LEVELS.map((level) => names[level]),
+        ...LEVELS.map((level) => (names[level] ? nameKey(names[level] as string) : null)),
+        auth.user.user_id,
+        optionalText(body.note, 300),
+      ],
+    );
+    return ok({ area: row });
+  }),
+);
+router.delete(
+  "/investigators/:user_id/areas/:area_id",
+  withPermission(PERMISSIONS.INVESTIGATIONS_MANAGE, async (context) => {
+    const rows = await query(
+      `UPDATE investigator_service_areas SET active = false, updated_at = now()
+       WHERE area_id = $1 AND user_id = $2 AND NOT is_primary RETURNING area_id`,
+      [context.params.area_id, context.params.user_id],
+    );
+    if (!rows.length) throw ApiError.badRequest("Only extra areas can be removed; the investigator changes the primary one from the app");
+    return ok({ removed: true });
+  }),
+);
+
 router.post(
   "/investigators/match",
   withPermission(PERMISSIONS.INVESTIGATIONS_MANAGE, async (context) => {

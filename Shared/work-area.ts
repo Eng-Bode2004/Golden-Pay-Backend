@@ -95,6 +95,20 @@ export async function saveWorkArea(area: WorkArea, userId: string) {
   const { names } = area;
   const rows = await transaction(async () => {
     await rememberPath(names, userId);
+    // The work area is also the investigator's primary service area for dispatch.
+    await query(
+      `INSERT INTO investigator_service_areas (user_id, is_primary, governorate, district, local_unit, main_village,
+         sub_village, governorate_key, district_key, local_unit_key, main_village_key, sub_village_key)
+       VALUES ($1, true, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       ON CONFLICT (user_id) WHERE is_primary DO UPDATE SET governorate=$2, district=$3, local_unit=$4,
+         main_village=$5, sub_village=$6, governorate_key=$7, district_key=$8, local_unit_key=$9,
+         main_village_key=$10, sub_village_key=$11, active=true, updated_at=now()`,
+      [
+        userId,
+        ...AREA_LEVELS.map((level) => names[level]),
+        ...AREA_LEVELS.map((level) => (names[level] ? nameKey(names[level] as string) : null)),
+      ],
+    );
     return query(
       `INSERT INTO investigator_profiles(user_id,governorate,district,local_unit,main_village,sub_village,street,
          governorate_key,district_key,local_unit_key,main_village_key,sub_village_key,lat,lng,location_set_at)
