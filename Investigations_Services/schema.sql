@@ -248,3 +248,32 @@ CREATE TABLE IF NOT EXISTS dispatch_outbox (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_outbox_once ON dispatch_outbox (investigation_id, user_id, kind, round);
 CREATE INDEX IF NOT EXISTS idx_outbox_user ON dispatch_outbox (user_id, outbox_id);
+
+-- ───────────── Prices per company/bank and per area (head office) ─────────────
+-- A rule sets the client price and the investigator's pay for one investigation type,
+-- optionally for one client and optionally for one governorate or district. The most
+-- specific matching rule wins; with none, the type's own prices apply. Prices are copied
+-- onto each case when it is sent, so later changes never alter sent cases.
+CREATE TABLE IF NOT EXISTS price_rules (
+  rule_id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  service_level text NOT NULL REFERENCES service_levels(code),
+  client_id text,
+  governorate text,
+  governorate_key text,
+  district text,
+  district_key text,
+  client_price numeric(12,2) NOT NULL DEFAULT 0,
+  investigator_price numeric(12,2) NOT NULL DEFAULT 0,
+  active boolean NOT NULL DEFAULT true,
+  note text,
+  created_by text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_by text,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_price_rule
+  ON price_rules (service_level, COALESCE(client_id, ''), COALESCE(governorate_key, ''), COALESCE(district_key, '')) WHERE active;
+CREATE INDEX IF NOT EXISTS idx_price_rules_lookup ON price_rules (service_level, client_id) WHERE active;
+
+-- Which price list a case was priced from (for the audit trail).
+ALTER TABLE investigations ADD COLUMN IF NOT EXISTS price_rule_id text;

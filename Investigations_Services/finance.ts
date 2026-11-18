@@ -192,7 +192,8 @@ export function registerFinanceRoutes(router: Router): void {
 
   router.patch(
     "/investigations/service-levels/:code",
-    withPermission(PERMISSIONS.FINANCE_MANAGE, async (context, auth) => {
+    // Head office sets prices and timings (administrators send cases with them).
+    withPermission(PERMISSIONS.PRICING_MANAGE, async (context, auth) => {
       const body = await readJson(context.req);
       const price = (field: string) => {
         const value = optionalNumber(body[field], field);

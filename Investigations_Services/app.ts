@@ -17,6 +17,7 @@ import { ApiError, created, ok, readFormData, readJson, type RequestContext } fr
 import { Router } from "../IdentityAcess_Services/Utils/router.ts";
 import { optionalNumber, optionalText, requiredText, startService } from "../Shared/service.ts";
 import { findServiceLevel, registerFinanceRoutes, seedServiceLevels } from "./finance.ts";
+import { quotePrice, registerPricingRoutes } from "./pricing.ts";
 import {
   acceptOffer,
   assignManually,
@@ -327,11 +328,13 @@ async function createInvestigation(context: RequestContext, auth: AuthContext): 
     throw ApiError.badRequest("Choose the appointment for a scheduled investigation", { field: "scheduled_at" });
   }
   const dueAt = scheduled ?? new Date(Date.now() + Number(level.delivery_hours) * 3_600_000);
-  const money = (field: string, fallback: unknown) => {
-    const value = optionalNumber(body[field], field);
-    if (value !== null && value < 0) throw ApiError.badRequest(`${field} cannot be negative`, { field });
-    return value ?? Number(fallback);
-  };
+  // Prices come from head office's price list: this client, this area, this type.
+  const quote = await quotePrice(
+    level,
+    (template.client_id as string | null) ?? null,
+    optionalText(body.governorate, 120),
+    optionalText(body.district, 120),
+  );
 
   const id = crypto.randomUUID();
   const reference = await nextReference();
@@ -369,8 +372,8 @@ async function createInvestigation(context: RequestContext, auth: AuthContext): 
         null,
         level.code,
         level.name_ar,
-        money("client_price", level.client_price),
-        money("investigator_price", level.investigator_price),
+        quote.client_price,
+        quote.investigator_price,
         dueAt,
         level.accept_minutes,
         template.version_id,
@@ -386,6 +389,7 @@ async function createInvestigation(context: RequestContext, auth: AuthContext): 
         await query("INSERT INTO investigation_recipients(investigation_id,user_id) VALUES($1,$2)", [id, user]);
       }
     }
+    await query("UPDATE investigations SET price_rule_id = $2 WHERE investigation_id = $1", [id, quote.rule_id]);
     await logEvent(id, "created", null, auth.user.user_id);
   });
   await offerNext(id);
@@ -464,6 +468,7 @@ const router = new Router();
 
 router.get("/investigations/mine", withAuth(listMine));
 registerFinanceRoutes(router);
+registerPricingRoutes(router);
 router.get("/investigations", withPermission(MANAGE, listAll));
 router.post("/investigations", withPermission(MANAGE, createInvestigation));
 

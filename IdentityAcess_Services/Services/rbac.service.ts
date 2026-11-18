@@ -19,10 +19,11 @@ export const PERMISSIONS = {
   HEADOFFICE_MANAGE: "headoffice:manage",
   TEMPLATES_MANAGE: "templates:manage",
   TEMPLATES_APPROVE: "templates:approve",
+  PRICING_MANAGE: "pricing:manage",
 } as const;
 
 /** Head office permissions: administrators never hold them through the admin role. */
-const HEAD_OFFICE_ONLY: string[] = ["headoffice:manage", "templates:manage", "templates:approve"];
+const HEAD_OFFICE_ONLY: string[] = ["headoffice:manage", "templates:manage", "templates:approve", "pricing:manage"];
 
 export type PermissionCode = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
 
@@ -48,6 +49,7 @@ const PERMISSION_DEFINITIONS: Array<{ code: PermissionCode; description: string 
   { code: PERMISSIONS.HEADOFFICE_MANAGE, description: "Head office: attendance, points, salaries, expenses and complaints" },
   { code: PERMISSIONS.TEMPLATES_MANAGE, description: "Upload, map and version client report templates" },
   { code: PERMISSIONS.TEMPLATES_APPROVE, description: "Review, approve and activate client report templates" },
+  { code: PERMISSIONS.PRICING_MANAGE, description: "Head office: investigation prices per client and area" },
 ];
 
 const ROLE_DEFINITIONS: Array<{ name: RoleName; description: string; permissions: PermissionCode[] }> = [
@@ -60,7 +62,12 @@ const ROLE_DEFINITIONS: Array<{ name: RoleName; description: string; permissions
   {
     name: ROLES.HEAD_OFFICE,
     description: "Head office: salaries, attendance, points and business results",
-    permissions: [PERMISSIONS.HEADOFFICE_MANAGE, PERMISSIONS.TEMPLATES_MANAGE, PERMISSIONS.TEMPLATES_APPROVE],
+    permissions: [
+      PERMISSIONS.HEADOFFICE_MANAGE,
+      PERMISSIONS.TEMPLATES_MANAGE,
+      PERMISSIONS.TEMPLATES_APPROVE,
+      PERMISSIONS.PRICING_MANAGE,
+    ],
   },
   {
     name: ROLES.HR,
