@@ -39,6 +39,7 @@ import {
 } from "./dispatch.ts";
 import { EXCLUSION_LABELS, imbalance } from "./fairness.ts";
 import { notify } from "../Shared/notifications.ts";
+import { seesMoney, withoutMoney } from "./money-visibility.ts";
 import { canonicalNames } from "../Shared/places.ts";
 import { firstPhotosKey, NEGATIVE_PHOTOS_KEY, negativeAnswers, negativeSummary } from "./negative.ts";
 import { LOCATION_KINDS, NEGATIVE_REASONS } from "./outcome.ts";
@@ -424,7 +425,7 @@ async function createInvestigation(context: RequestContext, auth: AuthContext): 
   return created({ investigation_id: id, reference, recipients: recipients.length });
 }
 
-async function listAll(context: RequestContext): Promise<Response> {
+async function listAll(context: RequestContext, auth: AuthContext): Promise<Response> {
   const status = context.url.searchParams.get("status");
   const search = context.url.searchParams.get("search")?.trim();
   const rows = await query(
@@ -446,10 +447,11 @@ async function listAll(context: RequestContext): Promise<Response> {
     [status || null, search || null],
   );
   const counts = await query("SELECT status, count(*)::int AS total FROM investigations GROUP BY status");
-  return ok({
+  const listed = {
     investigations: rows,
     counts: Object.fromEntries(counts.map((row) => [row.status, row.total])),
-  });
+  };
+  return ok(seesMoney(auth) ? listed : withoutMoney(listed));
 }
 
 async function listMine(_context: RequestContext, auth: AuthContext): Promise<Response> {
@@ -609,9 +611,12 @@ router.get(
       "SELECT expires_at, seen_at FROM investigation_offers WHERE investigation_id=$1 AND user_id=$2 AND response IS NULL",
       [row.investigation_id, auth.user.user_id],
     );
+    // Administrators review cases without the money; the investigator sees their own pay.
+    const hideMoney = manager && row.assignee_id !== auth.user.user_id && !seesMoney(auth);
+    const detail = withImages(row, await imagesOf(row.investigation_id), manager);
     return ok({
       investigation: {
-        ...withImages(row, await imagesOf(row.investigation_id), manager),
+        ...(hideMoney ? withoutMoney(detail) : detail),
         assignee: users[0] ?? null,
         offer_expires_at: offer?.expires_at ?? null,
         negative_reasons_catalog: NEGATIVE_REASONS,

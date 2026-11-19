@@ -25,7 +25,7 @@ export const PERMISSIONS = {
 
 /** Head office permissions: administrators never hold them through the admin role. */
 // Accepting new investigators (users:approve) is head office's alone too.
-const HEAD_OFFICE_ONLY: string[] = ["headoffice:manage", "templates:manage", "templates:approve", "pricing:manage", "users:approve"];
+const HEAD_OFFICE_ONLY: string[] = ["headoffice:manage", "templates:manage", "templates:approve", "pricing:manage", "users:approve", "finance:manage"];
 
 export type PermissionCode = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
 

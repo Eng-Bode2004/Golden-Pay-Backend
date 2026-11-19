@@ -2,6 +2,7 @@ import { query } from "../IdentityAcess_Services/Config/db.ts";
 import { withAnyPermission, withAuth, withPermission } from "../IdentityAcess_Services/MIddlewares/auth.middleware.ts";
 import { recordAudit } from "../IdentityAcess_Services/Services/audit.service.ts";
 import { PERMISSIONS } from "../IdentityAcess_Services/Services/rbac.service.ts";
+import { seesMoney, withoutMoney } from "./money-visibility.ts";
 import { ApiError, ok, readJson, type RequestContext } from "../IdentityAcess_Services/Utils/http.ts";
 import type { Router } from "../IdentityAcess_Services/Utils/router.ts";
 import { optionalNumber, optionalText } from "../Shared/service.ts";
@@ -294,15 +295,16 @@ export function registerFinanceRoutes(router: Router): void {
 
   router.get(
     "/investigations/performance",
-    withAnyPermission([PERMISSIONS.INVESTIGATIONS_MANAGE, PERMISSIONS.HEADOFFICE_MANAGE], async (context) => {
+    withAnyPermission([PERMISSIONS.INVESTIGATIONS_MANAGE, PERMISSIONS.HEADOFFICE_MANAGE], async (context, auth) => {
       const month = monthStart(context);
-      return ok({ month: month.slice(0, 7), investigators: await query(PERFORMANCE_SQL, [month, null]) });
+      const result = { month: month.slice(0, 7), investigators: await query(PERFORMANCE_SQL, [month, null]) };
+      return ok(seesMoney(auth) ? result : withoutMoney(result));
     }),
   );
 
   router.get(
     "/investigations/performance/:user_id",
-    withAnyPermission([PERMISSIONS.INVESTIGATIONS_MANAGE, PERMISSIONS.HEADOFFICE_MANAGE], async (context) => {
+    withAnyPermission([PERMISSIONS.INVESTIGATIONS_MANAGE, PERMISSIONS.HEADOFFICE_MANAGE], async (context, auth) => {
       const month = monthStart(context);
       const user = context.params.user_id ?? "";
       const [stats, months, levels, clients, recent, responses, lifecycle] = await Promise.all([
@@ -330,7 +332,7 @@ export function registerFinanceRoutes(router: Router): void {
         query(RESPONSE_SQL, [month, user]),
         query(LIFECYCLE_SQL, [user]),
       ]);
-      return ok({
+      const result = {
         month: month.slice(0, 7),
         stats: stats[0] ?? null,
         responses: responses[0] ?? null,
@@ -339,7 +341,8 @@ export function registerFinanceRoutes(router: Router): void {
         by_level: levels,
         by_client: clients,
         recent,
-      });
+      };
+      return ok(seesMoney(auth) ? result : withoutMoney(result));
     }),
   );
 
