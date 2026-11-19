@@ -2,6 +2,7 @@ import RoleModel from "../Models/RoleSchema.ts";
 import PermissionModel from "../Models/PermissionSchema.ts";
 import RolePermissionModel from "../Models/RolePermissionSchema.ts";
 import UserRoleModel from "../Models/UserRolesSchema.ts";
+import { query } from "../Config/db.ts";
 import { newId } from "../Utils/crypto.ts";
 import { ApiError } from "../Utils/http.ts";
 import { logger } from "../Utils/logger.ts";
@@ -23,7 +24,8 @@ export const PERMISSIONS = {
 } as const;
 
 /** Head office permissions: administrators never hold them through the admin role. */
-const HEAD_OFFICE_ONLY: string[] = ["headoffice:manage", "templates:manage", "templates:approve", "pricing:manage"];
+// Accepting new investigators (users:approve) is head office's alone too.
+const HEAD_OFFICE_ONLY: string[] = ["headoffice:manage", "templates:manage", "templates:approve", "pricing:manage", "users:approve"];
 
 export type PermissionCode = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
 
@@ -141,6 +143,9 @@ export async function seedRbac(): Promise<void> {
         { upsert: true },
       );
     }
+    // A permission taken out of a system role's definition is taken from the role too.
+    const kept = definition.permissions.map((code) => permissionIds.get(code)).filter(Boolean) as string[];
+    await query("DELETE FROM role_permissions WHERE role_id = $1 AND NOT (permission_id = ANY($2::text[]))", [roleId, kept]);
   }
 
   logger.info("rbac.seeded", {
