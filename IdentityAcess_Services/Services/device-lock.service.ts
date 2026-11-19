@@ -46,14 +46,10 @@ export async function assertInvestigatorDevice(
 ): Promise<void> {
   if (!(await isInvestigator(userId))) return;
   const id = cleanDeviceId(device.deviceId);
-  if (!id) {
-    throw new ApiError(
-      403,
-      "DEVICE_REQUIRED",
-      "Update the Golden Pay app to the latest version to sign in",
-    );
-  }
-  const [bound] = await query("SELECT device_id FROM investigator_devices WHERE user_id = $1", [userId]);
+  // An older app sends no phone ID: let the investigator in (nothing to compare yet). The
+  // phone is registered at their first sign-in from the updated app.
+  if (!id) return;
+  const [bound] = await query("SELECT device_id, device_name FROM investigator_devices WHERE user_id = $1", [userId]);
   if (!bound) {
     await query(
       `INSERT INTO investigator_devices (user_id, device_id, device_name, platform, last_seen_at)
@@ -64,7 +60,15 @@ export async function assertInvestigatorDevice(
     if (now?.device_id === id) return;
     throw deviceRefused();
   }
-  if (bound.device_id !== id) throw deviceRefused();
+  if (bound.device_id !== id) {
+    // The same phone can report a new ID after the app is reinstalled from a differently
+    // signed build or its data is cleared. Same phone model: still their phone, keep the new ID.
+    const name = cleanName(device.deviceName);
+    const samePhone = Boolean(name && bound.device_name && name !== "Golden Pay mobile" && name === bound.device_name);
+    if (!samePhone) throw deviceRefused();
+    await query("UPDATE investigator_devices SET device_id = $2, last_seen_at = now() WHERE user_id = $1", [userId, id]);
+    return;
+  }
   await query("UPDATE investigator_devices SET last_seen_at = now() WHERE user_id = $1", [userId]);
 }
 
