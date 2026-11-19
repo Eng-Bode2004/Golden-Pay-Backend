@@ -5,6 +5,7 @@ import { PERMISSIONS } from "../IdentityAcess_Services/Services/rbac.service.ts"
 import { ApiError, ok, readJson, type RequestContext } from "../IdentityAcess_Services/Utils/http.ts";
 import { Router } from "../IdentityAcess_Services/Utils/router.ts";
 import { offerNext } from "../Investigations_Services/dispatch.ts";
+import { canonicalNames, mergeDuplicatePlaces } from "../Shared/places.ts";
 import { allClients, clientsOf, parseClientIds, setClientsOf, WORKS_FOR_CLIENT_SQL } from "../Shared/investigator-clients.ts";
 import { optionalNumber, optionalText, startService } from "../Shared/service.ts";
 import {
@@ -126,7 +127,9 @@ export async function matchInvestigators(filter: Record<string, unknown>) {
     );
   }
 
-  const wanted = LEVELS.map((level) => [level, optionalText(filter[level], 120)] as const).filter(
+  const typed = Object.fromEntries(LEVELS.map((level) => [level, optionalText(filter[level], 120)])) as Record<Level, string | null>;
+  const snapped = typed.governorate ? await canonicalNames(typed, { strictGovernorate: false }) : typed;
+  const wanted = LEVELS.map((level) => [level, snapped[level]] as const).filter(
     (entry): entry is readonly [Level, string] => Boolean(entry[1]),
   );
   if (!wanted.length) throw ApiError.badRequest("Choose at least a governorate");
@@ -324,6 +327,12 @@ if (import.meta.main) {
     router,
     schema: join(import.meta.dir, "schema.sql"),
     healthPrefix: "/investigators",
-    seed: seedLocations,
+    // The place list, then the same place spelled differently is combined into one.
+    seed: async () => {
+      await seedLocations();
+      await mergeDuplicatePlaces().catch((error) =>
+        console.error("places.merge_failed", error instanceof Error ? error.message : String(error)),
+      );
+    },
   });
 }

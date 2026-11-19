@@ -3,23 +3,40 @@
 // and changed later from the app's profile. Used by the investigators and identity services.
 import { query, transaction } from "../IdentityAcess_Services/Config/db.ts";
 import { ApiError } from "../IdentityAcess_Services/Utils/http.ts";
+import { canonicalNames } from "./places.ts";
 import { optionalNumber, optionalText, requiredText } from "./service.ts";
 
 export const AREA_LEVELS = ["governorate", "district", "local_unit", "main_village", "sub_village"] as const;
 export type AreaLevel = (typeof AREA_LEVELS)[number];
 
-/** Spelling variants of the same Arabic place name compare as equal. */
+/** Words that name the kind of place, not the place: «محافظة القاهرة» is «القاهرة». */
+const PLACE_WORDS = /^(?:محافظه|مركز|قسم|مدينه|حي|الوحده المحليه(?: ل| ب)?|وحده محليه(?: ل| ب)?|قريه|ناحيه)\s+(?=\S)/;
+
+/**
+ * The comparison key of a place name: spelling variants of the same Arabic name are equal
+ * («القاهرة», «القاهره», «قاهرة», «محافظة القاهرة», «القاهرة.»). Typos beyond that are
+ * caught by Shared/places.ts, which snaps a name to the existing place.
+ */
 export function nameKey(value: string): string {
-  return value
+  let key = value
     .trim()
-    .replace(/[ً-ْـ]/g, "")
-    .replace(/[أإآا]/g, "ا")
-    .replace(/ى/g, "ي")
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, "") // diacritics and tatweel
+    .replace(/[أإآٱا]/g, "ا")
+    .replace(/[ىی]/g, "ي")
     .replace(/ة/g, "ه")
     .replace(/ؤ/g, "و")
     .replace(/ئ/g, "ي")
+    .replace(/ک/g, "ك")
+    .replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - 0x0660))
+    .replace(/[-_.,،؛;:()\[\]{}"'«»/\\]+/g, " ")
     .replace(/\s+/g, " ")
+    .trim()
     .toLowerCase();
+  key = key.replace(PLACE_WORDS, "");
+  // A leading «ال» and the spaces between words never change the place
+  // («قاهرة» = «القاهرة», «كفرالشيخ» = «كفر الشيخ»).
+  key = key.replace(/\s+/g, "");
+  return key.length > 4 && key.startsWith("ال") ? key.slice(2) : key;
 }
 
 export interface WorkArea {
@@ -92,7 +109,8 @@ export function publicWorkProfile(row: Record<string, unknown> | undefined) {
 
 /** Saves (or replaces) the investigator's work area and returns the public profile. */
 export async function saveWorkArea(area: WorkArea, userId: string) {
-  const { names } = area;
+  // A typed name that is one slip away from an existing place becomes that place.
+  const names = await canonicalNames(area.names);
   const rows = await transaction(async () => {
     await rememberPath(names, userId);
     // The work area is also the investigator's primary service area for dispatch.
@@ -169,7 +187,7 @@ export async function listServiceAreas(userId: string): Promise<Record<string, u
  * twice is ignored, so overlapping choices never produce duplicate offers.
  */
 export async function addServiceArea(area: WorkArea, userId: string, addedBy: string | null, note: string | null = null) {
-  const { names } = area;
+  const names = await canonicalNames(area.names);
   const keys = AREA_LEVELS.map((level) => (names[level] ? nameKey(names[level] as string) : null));
   const existing = await query(
     `SELECT area_id FROM investigator_service_areas

@@ -39,6 +39,7 @@ import {
 } from "./dispatch.ts";
 import { EXCLUSION_LABELS, imbalance } from "./fairness.ts";
 import { notify } from "../Shared/notifications.ts";
+import { canonicalNames } from "../Shared/places.ts";
 import { firstPhotosKey, NEGATIVE_PHOTOS_KEY, negativeAnswers, negativeSummary } from "./negative.ts";
 import { LOCATION_KINDS, NEGATIVE_REASONS } from "./outcome.ts";
 import { renderStandardPdf } from "./pdf.ts";
@@ -342,12 +343,18 @@ async function createInvestigation(context: RequestContext, auth: AuthContext): 
     throw ApiError.badRequest("Choose the appointment for a scheduled investigation", { field: "scheduled_at" });
   }
   const dueAt = scheduled ?? new Date(Date.now() + Number(level.delivery_hours) * 3_600_000);
+  // The subject's area, each name snapped to the existing place (no «القاهر» next to «القاهرة»).
+  const typedPlace = Object.fromEntries(AREA_LEVELS.map((name) => [name, optionalText(body[name], 120)])) as Record<
+    (typeof AREA_LEVELS)[number],
+    string | null
+  >;
+  const place = typedPlace.governorate ? await canonicalNames(typedPlace, { strictGovernorate: false }) : typedPlace;
   // Prices come from head office's price list: this client, this area, this type.
   const quote = await quotePrice(
     level,
     (template.client_id as string | null) ?? null,
-    optionalText(body.governorate, 120),
-    optionalText(body.district, 120),
+    place.governorate,
+    place.district,
   );
 
   const id = crypto.randomUUID();
@@ -372,7 +379,7 @@ async function createInvestigation(context: RequestContext, auth: AuthContext): 
         optionalText(body.subject_phone, 30),
         optionalText(body.client_reference, 80),
         requiredText(body.address, "address", 400),
-        ...AREA_LEVELS.map((level) => optionalText(body[level], 120)),
+        ...AREA_LEVELS.map((name) => place[name]),
         optionalText(body.landmark, 300),
         optionalNumber(body.lat, "lat"),
         optionalNumber(body.lng, "lng"),

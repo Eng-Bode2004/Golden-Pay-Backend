@@ -1,3 +1,4 @@
+import { canonicalNames } from "../Shared/places.ts";
 import { query } from "../IdentityAcess_Services/Config/db.ts";
 import { withPermission } from "../IdentityAcess_Services/MIddlewares/auth.middleware.ts";
 import { recordAudit } from "../IdentityAcess_Services/Services/audit.service.ts";
@@ -163,8 +164,19 @@ export function registerPricingRoutes(router: Router): void {
         const [client] = await query("SELECT 1 FROM form_clients WHERE client_id = $1", [clientId]);
         if (!client) throw ApiError.badRequest("Unknown client", { field: "client_id" });
       }
-      const governorate = optionalText(body.governorate, 120);
-      const district = optionalText(body.district, 120);
+      // Snapped to the existing places, so one price never splits over two spellings.
+      const snapped = await canonicalNames(
+        {
+          governorate: optionalText(body.governorate, 120),
+          district: optionalText(body.district, 120),
+          local_unit: null,
+          main_village: null,
+          sub_village: null,
+        },
+        { strictGovernorate: false },
+      );
+      const governorate = snapped.governorate;
+      const district = snapped.district;
       if (district && !governorate) throw ApiError.badRequest("Choose the governorate of this district", { field: "governorate" });
       if (!clientId && !governorate) {
         throw ApiError.badRequest("Choose a client, an area or both (the type's own price covers everything else)");

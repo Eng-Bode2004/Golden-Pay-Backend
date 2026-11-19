@@ -17,6 +17,15 @@ CREATE TABLE IF NOT EXISTS geo_locations (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_geo_location
   ON geo_locations (COALESCE(parent_id, ''), name_key);
 CREATE INDEX IF NOT EXISTS idx_geo_parent ON geo_locations (parent_id, level);
+-- Places combined because they were the same place spelled differently (Shared/places.ts).
+CREATE TABLE IF NOT EXISTS place_merges (
+  merge_id bigserial PRIMARY KEY,
+  level integer NOT NULL,
+  from_name text NOT NULL,
+  into_name text NOT NULL,
+  into_id text,
+  merged_at timestamptz NOT NULL DEFAULT now()
+);
 
 CREATE TABLE IF NOT EXISTS investigator_profiles (
   user_id text PRIMARY KEY REFERENCES users(user_id),
