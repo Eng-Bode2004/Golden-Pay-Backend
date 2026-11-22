@@ -48,6 +48,7 @@ import { canonicalNames } from "../Shared/places.ts";
 import { firstPhotosKey, NEGATIVE_PHOTOS_KEY, negativeAnswers, negativeSummary } from "./negative.ts";
 import { LOCATION_KINDS, NEGATIVE_REASONS } from "./outcome.ts";
 import { renderStandardPdf } from "./pdf.ts";
+import { uprightPhoto } from "./photos.ts";
 import { storeReportFile } from "./reports.ts";
 import { ConverterUnavailable, countPdfPages, docxToPdf } from "../Shared/templates/convert.ts";
 import {
@@ -209,7 +210,7 @@ async function buildReport(id: string): Promise<void> {
         for (const image of images) {
           const { bytes } = await readStoredFile(image.path as string);
           const key = placeKey && image.field_key === NEGATIVE_PHOTOS_KEY ? placeKey : (image.field_key as string);
-          (imageBytes[key] ??= []).push({ bytes: new Uint8Array(bytes) });
+          (imageBytes[key] ??= []).push({ bytes: await uprightPhoto(new Uint8Array(bytes)) });
         }
         const { bytes: layoutBytes } = await readStoredFile(version.layout_path as string);
         const report = await renderDocxReport({

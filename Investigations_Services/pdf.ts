@@ -19,9 +19,11 @@ import {
   upgradeLegacy,
   evaluate,
 } from "../Shared/templates/definition.ts";
+import { answerPlace, type MapPlace, pointPlace } from "../Shared/templates/location.ts";
 import { formatValue } from "../Shared/templates/render.ts";
 import { goldenPayStamp } from "../Shared/templates/report.ts";
 import { logoAspect, logoOutline } from "./logo.ts";
+import { firstPhotosKey, NEGATIVE_PHOTOS_KEY } from "./negative.ts";
 
 export interface ReportData {
   reference: string;
@@ -97,6 +99,10 @@ function logoSvg(): string {
 const dateTime = (value: Date) =>
   new Intl.DateTimeFormat("ar-EG", { dateStyle: "long", timeStyle: "short", timeZone: "Africa/Cairo" }).format(value);
 
+/** A place on the map: its QR code, and the same link to click. */
+const placeHtml = (place: MapPlace) =>
+  `<span class="place"><a href="${escape(place.url)}"><img src="${uri(place.qr, "image/png")}" alt=""/></a><a href="${escape(place.url)}" dir="ltr">${escape(place.label)}</a></span>`;
+
 function definitionOf(value: TemplateDefinition | unknown[]): TemplateDefinition {
   return Array.isArray(value) ? upgradeLegacy(value) : value;
 }
@@ -137,25 +143,34 @@ export async function renderHtml(report: ReportData): Promise<string> {
     }
     if (!isFilled(value)) return "";
     const text = formatValue(field, value);
+    const place = answerPlace(field, value);
+    if (place) return `<tr><th>${escape(field.label)}</th><td>${escape(place.rest)} ${placeHtml(place)}</td></tr>`;
     return field.type === "textarea"
       ? `<tr><td colspan="2" class="long"><b>${escape(field.label)}</b><p>${escape(text)}</p></td></tr>`
       : `<tr><th>${escape(field.label)}</th><td>${escape(text)}</td></tr>`;
   };
 
+  const photoPages: string[] = [];
+  const addPhotoPages = (label: string, uris: string[]) =>
+    uris.forEach((src, index) =>
+      photoPages.push(
+        `<div class="photo-page"><h2>${escape(uris.length > 1 ? `${label} (${index + 1} من ${uris.length})` : label)}</h2><div class="photo"><img src="${src}"/></div></div>`,
+      ),
+    );
+
   const sections = definition.sections
     .filter((section) => sectionVisible(section, answers))
     .map((section) => {
       const rows: string[] = [];
-      const photos: string[] = [];
+      const signatures: string[] = [];
       for (const field of section.fields) {
         if (!evaluate(field.visible_if, answers)) continue;
         if (field.type === "photos" || field.type === "signature") {
           const uris = photosByField.get(field.key) ?? [];
-          if (uris.length) {
-            photos.push(
-              `<h3>${escape(field.label)}</h3><div class="${field.type === "signature" ? "signature" : "photos"}">${uris
-                .map((src) => `<figure><img src="${src}"/></figure>`)
-                .join("")}</div>`,
+          if (field.type === "photos") addPhotoPages(field.label, uris);
+          else if (uris.length) {
+            signatures.push(
+              `<h3>${escape(field.label)}</h3><div class="signature">${uris.map((src) => `<figure><img src="${src}"/></figure>`).join("")}</div>`,
             );
           }
           continue;
@@ -163,14 +178,20 @@ export async function renderHtml(report: ReportData): Promise<string> {
         const html = row(field);
         if (html) rows.push(html);
       }
-      if (!rows.length && !photos.length) return "";
-      return `<section><h2>${escape(section.title)}</h2>${rows.length ? `<table>${rows.join("")}</table>` : ""}${photos.join("")}</section>`;
+      if (!rows.length && !signatures.length) return "";
+      return `<section><h2>${escape(section.title)}</h2>${rows.length ? `<table>${rows.join("")}</table>` : ""}${signatures.join("")}</section>`;
     })
     .join("");
+  // A negative report's photos of the place are saved under their own key.
+  if (report.outcome === "negative") {
+    const key = firstPhotosKey(definition);
+    const label = definition.sections.flatMap((section) => section.fields).find((field) => field.key === key)?.label;
+    addPhotoPages(label ?? "صور المكان", photosByField.get(NEGATIVE_PHOTOS_KEY) ?? []);
+  }
 
   const gps =
-    report.submit_lat !== null
-      ? `<a href="https://maps.google.com/?q=${report.submit_lat},${report.submit_lng}">${report.submit_lat.toFixed(5)}, ${report.submit_lng?.toFixed(5)}</a>`
+    report.submit_lat !== null && report.submit_lng !== null
+      ? placeHtml(pointPlace(report.submit_lat, report.submit_lng))
       : "غير متوفر";
   const stamp = report.approved ? `<img class="stamp" src="${uri(await goldenPayStamp(), "image/png")}"/>` : "";
 
@@ -203,15 +224,22 @@ export async function renderHtml(report: ReportData): Promise<string> {
     .grid{margin-top:6px}
     .statement{background:#f6faf3;color:#2f4a22}
     .long p{margin:3px 0 0;white-space:pre-wrap}
-    .photos{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+    .photo-page{break-before:page;break-inside:avoid;height:266mm;display:flex;flex-direction:column;overflow:hidden}
+    .photo{flex:1;min-height:0;position:relative;margin-top:4mm}
+    .photo img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+    .place{display:inline-flex;flex-direction:column;align-items:center;vertical-align:top}
+    .place img{display:block;width:28mm;height:28mm;image-rendering:pixelated}
+    .trail td{width:62%;padding:2px 9px}
+    .trail .place{flex-direction:row;gap:3mm}
+    .trail .place img{width:22mm;height:22mm}
     .signature figure{width:220px;border:none}
     .signature img{height:90px;object-fit:contain}
     figure{margin:0;break-inside:avoid;border:1px solid #e6d7b3;border-radius:8px;overflow:hidden}
-    figure img{display:block;width:100%;height:230px;object-fit:cover}
+    figure img{display:block;width:100%}
     footer{margin-top:18px;padding-top:10px;border-top:2px solid #d9b46a;display:grid;
-      grid-template-columns:1fr 1fr;gap:4px 22px;font-size:10pt;break-inside:avoid;position:relative}
+      grid-template-columns:1fr 1fr;gap:4px 22px;font-size:10pt;break-inside:avoid;position:relative;min-height:126px}
     footer b{color:#7a5c22;margin-inline-end:6px}
-    .stamp{position:absolute;left:0;top:-6px;width:110px;opacity:.92}
+    .stamp{position:absolute;left:0;top:4px;width:110px;opacity:.92}
     a{color:#7a5c22}
     .negative{padding:12px 16px;border-radius:10px;background:#fdf1ef;border:1px solid #e9b8ad}
     .negative h2{color:#a33a22;border-color:#e9b8ad}
@@ -238,11 +266,11 @@ export async function renderHtml(report: ReportData): Promise<string> {
     ${sections}
     ${
       report.trail.length
-        ? `<section><h2>مواقع المستعلم أثناء الاستعلام</h2><table>${report.trail
+        ? `<section><h2>مواقع المستعلم أثناء الاستعلام</h2><table class="trail">${report.trail
             .map(
               (point) =>
                 `<tr><th>${escape(TRAIL_LABEL[point.kind] ?? point.kind)} — ${dateTime(new Date(point.created_at))}</th>
-                 <td><a href="https://maps.google.com/?q=${point.lat},${point.lng}">${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}</a></td></tr>`,
+                 <td>${placeHtml(pointPlace(point.lat, point.lng))}</td></tr>`,
             )
             .join("")}</table></section>`
         : ""
@@ -254,6 +282,7 @@ export async function renderHtml(report: ReportData): Promise<string> {
       <div><b>تاريخ الإرسال:</b>${dateTime(report.submitted_at)}</div>
       <div><b>موقع الزيارة:</b>${gps}</div>
     </footer>
+    ${photoPages.join("")}
   </body></html>`;
 }
 

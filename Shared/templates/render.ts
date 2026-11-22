@@ -38,6 +38,7 @@ import {
   type TemplateDefinition,
   visibleFields,
 } from "./definition.ts";
+import { answerPlace, type MapPlace, pointPlace } from "./location.ts";
 import type { Binding } from "./scan.ts";
 
 export interface RenderImage {
@@ -87,6 +88,13 @@ const ARABIC = /[؀-ۿ]/;
 const TICKED_BOX = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAMbSURBVHhe7ZutksIwFIUrkUgkEolEIpFIJBLJGyCRPAKPgEQikUgkEolEdud0pjuXm9M2aVOmKflmzuxutn/nNJcmAZLL5ZLudrufFLwn+CVJkp9U5j0GEAP4DGA+nxu10hfBW2UA+LuvMK8xANbYV5jXGABr7CvMawyANfYV5jUGwBpD4na7pev1OhvkLJfLbIJTBPMadAAwPxwOP64fOp/PetMM5jXYAF6vVzoejw3z0GQy0ZtnMK/BBoDuro1LMZjXIAM4HA6GYanRaKR3yWBegwvger2mg8HAMC2FgBjMa1ABlNV9rtlslr7fb71rBvMaVACr1cowLIUnwuPx0Lv9w7wGE8DxeDQMa51OJ73bB8xrEAHc7/fKut9sNno3A+a18wGgnvFc14al8P+iupcwr50PAMNcbVgKPQM9xAbmtdMB2NQ9trGFee1sADZ1j97hAvPayQB81r2Eee1kAHhF14alXOpewrx2LgA8y7VhLZe6lzCvzgFgpIURWb4AgbG5L3BsNr+Xwrnrwrw6BVD0wlT3jkhQzxjH62NLYR6A+UBdmFenAMrm4E1D2G63xjGlEHzT3sa8OgVQNhPDBRYtRVVhU/dFU1wXmFenAKq6KEIoW5Rk2NQ9ep4PmFenAGzuFMxgsdKGb9S9hHl1CgBUjc2hqnl5jj63lo+6l+jz1QoAVC1MQLhzZSFkH1Ai+0n5qHsJ81orAHTdxWJhXLAWhqus+z6fz2zhUm8vhXGGb5jXWgEAm/qFptOpEYL+qIoWwkFIvmFeawcAYAwGtQEt9JZ84qLPx+T6JLFFn7txAAB3qmx8kAsh2NS96/ldYF4bBwDwYmcTQpXaqHsJ8+olAFD0RqWt2qp7CfPqLQCAENhkyUZt1b2EefUaAMB8wDWEpue0hXn1HgCwGTLnKnsryzfMaysBAJsVXdshsy+Y19YCAPv93jAtVfVWlm+Y11YDAPr4ubAA8m30tXwlAIByyB+R+NnGOWxgXr8SQFdgXmMArLGvMK8xANbYV5jXGABr7CvMawxAN/781+Z+STGAGMAuTX796/N/yMybS4xhwkEAAAAASUVORK5CYII="), (c) => c.charCodeAt(0));
 const EMU_PER_TWIP = 635;
 const CM = 360000;
+const QR_SIDE = 2.8 * CM;
+/** A photo takes at most this share of the page's height: room stays for margins, headers and its caption. */
+const PHOTO_PAGE_SHARE = 0.6;
+/** Printers cannot print on the paper's edge (1 cm, in twips). */
+const PRINTABLE_EDGE = 567;
+const PHOTOS_ATTACHED = "الصور مرفقة في الصفحات التالية";
+const squash = (text: string) => text.replace(/[\s:.]+/g, "");
 
 const formatDate = (value: string) => {
   const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
@@ -124,6 +132,8 @@ export class TemplateRenderer {
   private readonly issues: RenderIssue[] = [];
   private readonly placed = new Set<string>();
   private docPrId = 7000;
+  /** Where the layout had photos. The photos themselves print on pages of their own, after the form. */
+  private readonly photoPlaces: { mark: Mark; field: FieldDef }[] = [];
 
   constructor(
     template: Uint8Array,
@@ -163,6 +173,7 @@ export class TemplateRenderer {
         this.apply(binding, mark);
       }
     }
+    this.settlePhotoPlaces();
     this.reportMissing();
     this.appendix();
     this.stripBookmarks();
@@ -203,9 +214,12 @@ export class TemplateRenderer {
     const key = binding.source?.startsWith("answers.") ? binding.source.slice(8) : undefined;
     if (key) this.placed.add(key);
     switch (binding.action) {
-      case "text":
-        this.writeAt(mark, this.text(binding.source));
+      case "text": {
+        const place = this.place(binding.source);
+        if (place) this.writePlace(mark, place);
+        else this.writeAt(mark, this.text(binding.source));
         break;
+      }
       case "choose":
         this.fillContainer(this.container(mark) ?? mark.start.parentNode as El, this.text(binding.source));
         break;
@@ -443,6 +457,137 @@ export class TemplateRenderer {
     }
   }
 
+  // ───────────── locations ─────────────
+
+  /** The map place a binding prints, if it prints one. */
+  private place(source: string | undefined): MapPlace | null {
+    if (!source || this.data.preview === "labels") return null;
+    if (source === "case.gps") return this.visitPlace();
+    return answerPlace(this.fieldOf(source), this.value(source));
+  }
+
+  private visitPlace(): MapPlace | null {
+    if (this.data.preview === "labels") return null;
+    const [lat, lng] = (this.data.caseValues?.gps ?? "").split(",").map((part) => part.trim());
+    return lat && lng && Number.isFinite(Number(lat)) && Number.isFinite(Number(lng)) ? pointPlace(Number(lat), Number(lng)) : null;
+  }
+
+  /** A QR code and, beside or under it, its link to click. */
+  private placeRuns(part: string, doc: Document, place: MapPlace, side: number, stacked: boolean): El[] {
+    const link = wEl(doc, "hyperlink");
+    link.setAttributeNS(NS.r, "r:id", this.pkg.addLink(part, place.url));
+    const run = wEl(doc, "r");
+    const rPr = wEl(doc, "rPr");
+    rPr.appendChild(wEl(doc, "color", { val: "0563C1" }));
+    rPr.appendChild(wEl(doc, "sz", { val: "16" }));
+    rPr.appendChild(wEl(doc, "szCs", { val: "16" }));
+    rPr.appendChild(wEl(doc, "u", { val: "single" }));
+    run.appendChild(rPr);
+    const text = wEl(doc, "t");
+    text.textContent = place.label;
+    run.appendChild(text);
+    link.appendChild(run);
+    const between = wEl(doc, "r");
+    if (stacked) between.appendChild(wEl(doc, "br"));
+    else {
+      const space = wEl(doc, "t");
+      space.setAttributeNS("http://www.w3.org/XML/1998/namespace", "xml:space", "preserve");
+      space.textContent = "   ";
+      between.appendChild(space);
+    }
+    const code = this.pictureRun(part, doc, place.qr, side, side)!;
+    return stacked ? [code, between, link] : [link, between, code];
+  }
+
+  /** A location answer: the client's box gets the QR code and the link, instead of a long address. */
+  private writePlace(mark: Mark, place: MapPlace): void {
+    const paragraph = ancestor(mark.start, "p");
+    if (!paragraph) return;
+    const cell = ancestor(paragraph, "tc");
+    const row = cell && ancestor(cell, "tr");
+    const rowProps = row && child(row, "trPr");
+    const height = rowProps ? child(rowProps, "trHeight") : undefined;
+    // A box that cannot grow would cut the code off: it keeps the link, and the visit's code prints under the form.
+    if (ancestor(paragraph, "txbxContent") || (height && attr(height, "hRule") === "exact")) {
+      this.writeAt(mark, [place.rest, place.label].filter(Boolean).join(" "));
+      return;
+    }
+    const holder = this.range(mark).length === 0 ? this.container(mark) : undefined;
+    const target = holder ? (children(holder, "p")[0] ?? paragraph) : paragraph;
+    if (holder) this.fillContainer(holder, place.rest);
+    else if (place.rest) this.writeAt(mark, place.rest);
+    else this.clearRange(mark, true);
+
+    const doc = target.ownerDocument!;
+    const side = Math.max(1.8 * CM, Math.min(QR_SIDE, this.holderWidth(cell) - 0.3 * CM));
+    const runs = this.placeRuns(mark.part, doc, place, side, true);
+    if (place.rest) {
+      const gap = wEl(doc, "r");
+      gap.appendChild(wEl(doc, "br"));
+      runs.unshift(gap);
+    }
+    let after: Node = mark.end ?? mark.start;
+    for (const run of runs) {
+      if (holder) target.appendChild(run);
+      else {
+        insertAfter(run, after);
+        after = run;
+      }
+    }
+    // A fixed line height would cut the code off.
+    const props = child(target, "pPr") ?? (target.insertBefore(wEl(doc, "pPr"), target.firstChild) as El);
+    let spacing = child(props, "spacing");
+    if (!spacing) {
+      spacing = wEl(doc, "spacing");
+      const later = ["ind", "contextualSpacing", "mirrorIndents", "jc", "textDirection", "textAlignment", "outlineLvl", "rPr", "sectPr"];
+      props.insertBefore(spacing, children(props).find((node) => later.includes(local(node))) ?? null);
+    }
+    spacing.setAttributeNS(NS.w, "w:line", "240");
+    spacing.setAttributeNS(NS.w, "w:lineRule", "auto");
+  }
+
+  // ───────────── photo places ─────────────
+
+  private hasContent(node: El): boolean {
+    if (local(node) === "tbl" || textOf(node).trim()) return true;
+    return ["drawing", "pict", "object", "txbxContent", "sym", "sectPr"].some((name) => descendants(node, name).length > 0);
+  }
+
+  /**
+   * «صور السكن» as the form's last line would be left alone on a page: it becomes the
+   * caption of the photo pages instead.
+   */
+  private moveClosingHeading(mark: Mark, field: FieldDef): boolean {
+    const paragraph = ancestor(mark.start, "p");
+    if (!paragraph || mark.part !== "word/document.xml" || this.hasContent(paragraph)) return false;
+    const body = paragraph.parentNode as El;
+    if (!isW(body, "body")) return false;
+    const blocks = children(body).filter((node) => local(node) !== "sectPr");
+    const at = blocks.indexOf(paragraph);
+    if (at < 0 || blocks.slice(at + 1).some((node) => this.hasContent(node))) return false;
+    let start = at - 1;
+    while (start >= 0 && !this.hasContent(blocks[start]!)) start -= 1;
+    const heading = blocks[start];
+    if (!heading || !isW(heading, "p") || squash(textOf(heading)) !== squash(field.label)) return false;
+    if (["drawing", "pict", "object", "sectPr"].some((name) => descendants(heading, name).length > 0)) return false;
+    for (const node of blocks.slice(start)) remove(node);
+    return true;
+  }
+
+  private settlePhotoPlaces(): void {
+    // Last first, so several headings closing a form all move.
+    for (const { mark, field } of [...this.photoPlaces].reverse()) {
+      if (this.moveClosingHeading(mark, field)) continue;
+      const paragraph = ancestor(mark.start, "p");
+      if (!paragraph) continue;
+      let after: Node = mark.end ?? mark.start;
+      for (const run of this.makeRuns(paragraph.ownerDocument!, PHOTOS_ATTACHED, this.runProps(null, paragraph))) {
+        insertAfter(run, after);
+        after = run;
+      }
+    }
+  }
+
   // ───────────── images ─────────────
 
   private parseFragment(xml: string, doc: Document): El {
@@ -493,6 +638,11 @@ export class TemplateRenderer {
       const field = this.fieldOf(binding.source);
       label = field?.label ?? "";
       if (field && this.visible.has(field.key)) pictures = (this.data.images[field.key] ?? []).map((image) => image.bytes);
+      if (field?.type === "photos") {
+        remove(existing);
+        if (pictures.length) this.photoPlaces.push({ mark, field });
+        return;
+      }
     }
 
     if (existing) {
@@ -654,44 +804,45 @@ export class TemplateRenderer {
     }
   }
 
-  /** Answers with no place in the client's layout are printed after it, never dropped. */
+  /** Trailing blank lines would push what is added after the form onto an empty page. */
+  private trimEnd(body: El): void {
+    const blocks = children(body).filter((node) => local(node) !== "sectPr");
+    for (let index = blocks.length - 1; index > 0; index -= 1) {
+      const node = blocks[index]!;
+      if (!isW(node, "p") || this.hasContent(node)) break;
+      // Two tables must not be joined, nor a table left ending the document.
+      if (isW(blocks[index - 1], "tbl")) break;
+      remove(node);
+    }
+  }
+
+  /**
+   * What follows the client's form, never dropped: answers with no place in the layout, the
+   * visit's location, then every photo on a page of its own.
+   */
   private appendix(): void {
     const body = child(this.pkg.xml("word/document.xml").documentElement as El, "body");
     if (!body) return;
     const doc = body.ownerDocument!;
-    const extraValues = visibleFields(this.data.definition, this.data.answers).filter(
+    const fields = visibleFields(this.data.definition, this.data.answers);
+    const extraValues = fields.filter(
       (field) => !this.placed.has(field.key) && !["photos", "signature", "attestation"].includes(field.type) &&
         isFilled(this.data.answers[field.key]),
     );
-    const extraPhotos = visibleFields(this.data.definition, this.data.answers).filter(
-      (field) => !this.placed.has(field.key) && ["photos", "signature"].includes(field.type) && (this.data.images[field.key]?.length ?? 0) > 0,
+    const extraSignatures = fields.filter(
+      (field) => !this.placed.has(field.key) && field.type === "signature" && (this.data.images[field.key]?.length ?? 0) > 0,
     );
-    const statements = visibleFields(this.data.definition, this.data.answers).filter(
+    const photoFields = fields.filter((field) => field.type === "photos" && (this.data.images[field.key]?.length ?? 0) > 0);
+    const statements = fields.filter(
       (field) => field.type === "attestation" && !this.placed.has(field.key) && this.data.answers[field.key] === true &&
         !missingEvidence(field, this.data.answers, this.data.evidence).length,
     );
     // Where the investigator sent the report from: printed on every report, under the
     // client's own layout. Never on previews with labels instead of answers.
-    const gps = this.data.preview === "labels" ? null : this.data.caseValues?.gps ?? null;
-    const gpsLine = gps
-      ? `موقع الزيارة (GPS): ⁦${gps}⁩ — https://maps.google.com/?q=${gps.replace(/\s+/g, "")}`
-      : null;
-    if (!extraValues.length && !extraPhotos.length && !statements.length) {
-      if (gpsLine) {
-        const sectPr = child(body, "sectPr");
-        const p = wEl(doc, "p");
-        const pPr = wEl(doc, "pPr");
-        pPr.appendChild(wEl(doc, "bidi"));
-        pPr.appendChild(wEl(doc, "spacing", { before: "120", after: "0" }));
-        p.appendChild(pPr);
-        const rPr = wEl(doc, "rPr");
-        rPr.appendChild(wEl(doc, "sz", { val: "18" }));
-        rPr.appendChild(wEl(doc, "szCs", { val: "18" }));
-        for (const run of this.makeRuns(doc, gpsLine, rPr)) p.appendChild(run);
-        body.insertBefore(p, sectPr ?? null);
-      }
-      return;
-    }
+    const visit = this.visitPlace();
+    const attached = extraValues.length + extraSignatures.length + statements.length > 0;
+    if (!attached && !visit && !photoFields.length) return;
+    this.trimEnd(body);
     for (const field of extraValues) {
       this.issues.push({ kind: "unplaced", key: field.key, label: field.label, message: `«${field.label}» ليس له مكان في نموذج العميل؛ طُبع في الملحق.` });
     }
@@ -719,8 +870,8 @@ export class TemplateRenderer {
       }
       return p;
     };
-    add(paragraph("ملحق التقرير", { bold: true, size: 30, pageBreak: true, center: true }));
-    if (gpsLine) add(paragraph(gpsLine, { size: 20 }));
+    if (attached) add(paragraph("ملحق التقرير", { bold: true, size: 30, pageBreak: true, center: true }));
+    if (visit) add(this.visitBlock(doc, visit));
     if (extraValues.length) {
       add(paragraph("بيانات إضافية", { bold: true, size: 24 }));
       const table = wEl(doc, "tbl");
@@ -744,7 +895,13 @@ export class TemplateRenderer {
           const tcPr = wEl(doc, "tcPr");
           tcPr.appendChild(wEl(doc, "tcW", { w: width, type: "dxa" }));
           cell.appendChild(tcPr);
-          cell.appendChild(paragraph(text, { bold }));
+          const place = bold ? null : answerPlace(field, this.data.answers[field.key]);
+          cell.appendChild(paragraph(place ? place.rest : text, { bold }));
+          if (place) {
+            const code = paragraph("", { center: true });
+            for (const run of this.placeRuns("word/document.xml", doc, place, QR_SIDE, true)) code.appendChild(run);
+            cell.appendChild(code);
+          }
           row.appendChild(cell);
         }
         table.appendChild(row);
@@ -752,7 +909,7 @@ export class TemplateRenderer {
       add(table);
     }
     for (const field of statements) add(paragraph(`• ${statementText(field, this.data.answers)}`));
-    for (const field of extraPhotos) {
+    for (const field of extraSignatures) {
       add(paragraph(field.label, { bold: true, size: 24 }));
       const holder = paragraph("", { center: true });
       add(holder);
@@ -761,6 +918,64 @@ export class TemplateRenderer {
       this.image({ anchor: "", action: "image", source: `answers.${field.key}` }, { part: "word/document.xml", start: marker, end: null });
       remove(marker);
     }
+    for (const field of photoFields) for (const node of this.photoPages(doc, body, field)) add(node);
+  }
+
+  /** A paragraph of our own, so the client's styles cannot indent it or clip its picture. */
+  private ownParagraph(doc: Document, flags: string[]): El {
+    const p = wEl(doc, "p");
+    const pPr = wEl(doc, "pPr");
+    for (const name of flags) pPr.appendChild(wEl(doc, name));
+    pPr.appendChild(wEl(doc, "bidi"));
+    pPr.appendChild(wEl(doc, "snapToGrid", { val: "0" }));
+    pPr.appendChild(wEl(doc, "spacing", { before: "0", after: "0", line: "240", lineRule: "auto" }));
+    pPr.appendChild(wEl(doc, "ind", { left: "0", right: "0", firstLine: "0" }));
+    pPr.appendChild(wEl(doc, "jc", { val: "center" }));
+    p.appendChild(pPr);
+    return p;
+  }
+
+  private visitBlock(doc: Document, place: MapPlace): El {
+    const p = this.ownParagraph(doc, ["keepLines"]);
+    const rPr = wEl(doc, "rPr");
+    rPr.appendChild(wEl(doc, "sz", { val: "18" }));
+    rPr.appendChild(wEl(doc, "szCs", { val: "18" }));
+    for (const run of this.makeRuns(doc, "موقع الزيارة (GPS): ", rPr)) p.appendChild(run);
+    for (const run of this.placeRuns("word/document.xml", doc, place, QR_SIDE, false)) p.appendChild(run);
+    return p;
+  }
+
+  /** Each photo: a new page, its caption, the whole picture as large as the page safely holds. */
+  private photoPages(doc: Document, body: El, field: FieldDef): El[] {
+    const section = child(body, "sectPr");
+    const page = Number(attr(section ? child(section, "pgSz") : undefined, "h") ?? 16838) * EMU_PER_TWIP;
+    const columns = Math.max(1, Number(attr(section ? child(section, "cols") : undefined, "num") || 1));
+    const width = this.holderWidth(undefined) / columns - 0.2 * CM;
+    const top = Math.abs(Number(attr(section ? child(section, "pgMar") : undefined, "top") ?? 1440));
+    const pictures = (this.data.images[field.key] ?? []).filter((image) => {
+      if (imageKind(image.bytes)) return true;
+      this.issues.push({ kind: "missing", label: field.label, message: `صورة في «${field.label}» بصيغة لا يدعمها Word (استخدم JPEG أو PNG).` });
+      return false;
+    });
+    return pictures.flatMap((image, index) => {
+      const caption = this.ownParagraph(doc, ["keepNext", "keepLines", "pageBreakBefore"]);
+      if (top < PRINTABLE_EDGE) {
+        // A taller line, as space before a paragraph is dropped at the top of a page.
+        const spacing = child(child(caption, "pPr")!, "spacing")!;
+        spacing.setAttributeNS(NS.w, "w:line", String(PRINTABLE_EDGE - top + 400));
+        spacing.setAttributeNS(NS.w, "w:lineRule", "exact");
+      }
+      const rPr = wEl(doc, "rPr");
+      rPr.appendChild(wEl(doc, "b"));
+      rPr.appendChild(wEl(doc, "bCs"));
+      rPr.appendChild(wEl(doc, "sz", { val: "26" }));
+      rPr.appendChild(wEl(doc, "szCs", { val: "26" }));
+      const title = pictures.length > 1 ? `${field.label} (${index + 1} من ${pictures.length})` : field.label;
+      for (const run of this.makeRuns(doc, title, rPr)) caption.appendChild(run);
+      const holder = this.ownParagraph(doc, ["keepLines"]);
+      holder.appendChild(this.pictureRun("word/document.xml", doc, image.bytes, width, page * PHOTO_PAGE_SHARE)!);
+      return [caption, holder];
+    });
   }
 
   private stripBookmarks(): void {

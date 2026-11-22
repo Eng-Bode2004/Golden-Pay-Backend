@@ -11,7 +11,7 @@
     "pdfjs-dist": "4.10.38"
   },
   "scripts": {
-    "test": "bun test templates/tests/definition.test.ts templates/tests/mapping.test.ts templates/tests/inventory.test.ts",
+    "test": "bun test templates/tests/definition.test.ts templates/tests/mapping.test.ts templates/tests/inventory.test.ts templates/tests/photo-pages.test.ts",
     "test:visual": "bun test templates/tests/visual.test.ts --timeout 300000",
     "test:visual:all": "VISUAL_ALL=1 bun test templates/tests/visual.test.ts --timeout 600000",
     "baselines:update": "UPDATE_BASELINES=1 bun test templates/tests/visual.test.ts --timeout 300000"

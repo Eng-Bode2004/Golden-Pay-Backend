@@ -17,6 +17,7 @@ export const NS = {
 } as const;
 
 const IMAGE_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+const LINK_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
 
 export type El = Element;
 
@@ -218,6 +219,15 @@ export class DocxPackage {
     this.files[`word/media/${name}`] = bytes;
     this.ensureDefault(ext, ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg");
 
+    return this.addRel(part, IMAGE_REL, `${part.startsWith("word/") ? "" : "word/"}media/${name}`);
+  }
+
+  /** Adds a link to an outside address from `part` and returns its relationship id. */
+  addLink(part: string, url: string): string {
+    return this.addRel(part, LINK_REL, url, true);
+  }
+
+  private addRel(part: string, type: string, target: string, external = false): string {
     const relsPart = this.relsPart(part);
     if (!this.has(relsPart)) {
       this.files[relsPart] = strToU8(
@@ -233,8 +243,9 @@ export class DocxPackage {
     while (used.has(`rIdGp${n}`)) n += 1;
     const rel = rels.createElementNS(NS.rel, "Relationship");
     rel.setAttribute("Id", `rIdGp${n}`);
-    rel.setAttribute("Type", IMAGE_REL);
-    rel.setAttribute("Target", `${part.startsWith("word/") ? "" : "word/"}media/${name}`);
+    rel.setAttribute("Type", type);
+    rel.setAttribute("Target", target);
+    if (external) rel.setAttribute("TargetMode", "External");
     rels.documentElement!.appendChild(rel);
     return `rIdGp${n}`;
   }

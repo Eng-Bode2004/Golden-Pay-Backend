@@ -101,11 +101,13 @@ describe("Bedayty residence (checkbox controls, labels in cells, statements, sta
     expect(out.issues.some((issue) => issue.kind === "awaiting_approval")).toBe(true);
   });
 
-  test("visit photos are embedded under the client's own photo heading", () => {
+  test("visit photos print on their own page, captioned with the client's photo heading", () => {
     const pkg = DocxPackage.open(out.docx);
     expect(pkg.names().some((name) => /^word\/media\/gp-\d+\.png$/.test(name))).toBe(true);
     const paragraphs = descendants(pkg.xml("word/document.xml").documentElement as El, "p");
     const heading = paragraphs.findIndex((p) => textOf(p).trim() === "صور السكن");
+    expect(paragraphs.filter((p) => textOf(p).trim() === "صور السكن").length).toBe(1);
+    expect(descendants(paragraphs[heading]!, "pageBreakBefore").length).toBe(1);
     expect(descendants(paragraphs[heading + 1]!, "blip", NS.a).length).toBe(1);
   });
 
