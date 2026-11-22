@@ -7,9 +7,11 @@ import { ApiError, ok, readJson } from "../../IdentityAcess_Services/Utils/http.
 import type { Router } from "../../IdentityAcess_Services/Utils/router.ts";
 import { optionalText, requiredText } from "../../Shared/service.ts";
 import { aiConfigured, AI_MODEL } from "./ai.ts";
-import { configuredInboxes, pollAll, sendFromInbox } from "./inbox.ts";
+import { runSystemCheck } from "./check.ts";
+import { configuredInboxes, pollAll, refetchMessage, sendFromInbox } from "./inbox.ts";
 import { loadProfiles, processMessage } from "./process.ts";
-import { KIND_LABELS, releaseTime, safeInlineType, type CaseKind } from "./rules.ts";
+import { setupClients } from "./setup.ts";
+import { domainMatches, findNationalId, KIND_LABELS, safeInlineType, sendTime, type CaseKind } from "./rules.ts";
 
 type Row = Record<string, unknown>;
 const MANAGE = PERMISSIONS.INVESTIGATIONS_MANAGE;
@@ -53,7 +55,7 @@ async function release(caseId: string, deps: IntakeDeps): Promise<{ ok: boolean;
     if (await alreadyCreated()) return { ok: true };
     const profile = (await loadProfiles()).find((p) => p.client_id === item.client_id);
     if (!profile) throw new Error("لم تعد هذه الجهة مضبوطة لاستقبال البريد");
-    const templateId = profile.templates[item.kind as CaseKind];
+    const templateId = (item.template_id as string | null) ?? profile.templates[item.kind as CaseKind];
     if (!templateId) throw new Error(`لا يوجد نموذج «${KIND_LABELS[item.kind as CaseKind] ?? item.kind}» لهذه الجهة`);
     const template = await deps.activeTemplate(templateId);
     const f = item.fields as Row;
@@ -67,18 +69,20 @@ async function release(caseId: string, deps: IntakeDeps): Promise<{ ok: boolean;
     ]
       .filter(Boolean)
       .join("\n");
-    const areas = [
-      f.district ? { mode: "hierarchy", governorate: f.governorate, district: f.district } : null,
-      { mode: "hierarchy", governorate: f.governorate },
-    ].filter(Boolean) as Row[];
+    // Sent to a chosen investigator, or to everyone in the area.
+    const targets: Row[] = item.assignee_id
+      ? [{ target_mode: "person", assignee_id: item.assignee_id }]
+      : ([
+          f.district ? { target_mode: "area", area: { mode: "hierarchy", governorate: f.governorate, district: f.district } } : null,
+          { target_mode: "area", area: { mode: "hierarchy", governorate: f.governorate } },
+        ].filter(Boolean) as Row[]);
     let created: { investigation_id: string; reference: string } | null = null;
     let lastError: unknown = null;
-    for (const area of areas) {
+    for (const target of targets) {
       try {
         created = await deps.insertCase(
           {
-            target_mode: "area",
-            area,
+            ...target,
             subject_name: f.subject_name,
             subject_phone: f.phone,
             client_reference: f.client_reference ?? f.national_id ?? null,
@@ -113,16 +117,21 @@ async function release(caseId: string, deps: IntakeDeps): Promise<{ ok: boolean;
   } catch (error) {
     // Saved, then offering it failed: the case exists, so it must not be offered for a retry.
     if (await alreadyCreated()) return { ok: true };
-    const reason = (error instanceof Error ? error.message : String(error)).slice(0, 500);
+    const reason =
+      error instanceof ApiError && error.code === "TEMPLATE_NOT_ACTIVE"
+        ? "النموذج غير مفعّل: اختر نموذجًا آخر أو فعّله من الإدارة العليا"
+        : (error instanceof Error ? error.message : String(error)).slice(0, 500);
     await query("UPDATE mail_cases SET status='failed', reason=$2, updated_at=now() WHERE case_id=$1", [caseId, reason]);
     return { ok: false, reason };
   }
 }
 
 let ticking = false;
+let lastRun: Date | null = null;
 async function tick(deps: IntakeDeps): Promise<void> {
   if (ticking) return;
   ticking = true;
+  lastRun = new Date();
   // What is due goes out first and between readings: a slow AI reading never holds back 08:00.
   const releaseDue = async () => {
     const due = await query("SELECT case_id FROM mail_cases WHERE status='ready' AND release_at <= now() ORDER BY release_at LIMIT 50");
@@ -132,9 +141,14 @@ async function tick(deps: IntakeDeps): Promise<void> {
     await releaseDue();
     await pollAll();
     // Read what arrived (one at a time: the AI reader is the slow part).
-    const fresh = await query("SELECT message_id FROM mail_messages WHERE status='new' ORDER BY received_at LIMIT 20");
+    const fresh = await query(
+      `SELECT message_id, raw_path FROM mail_messages
+       WHERE status='new' OR (status='failed' AND retry_at <= now())
+       ORDER BY (status='new') DESC, received_at LIMIT 20`,
+    );
     for (const row of fresh) {
-      await processMessage(row.message_id as string);
+      if (row.raw_path || (await refetchMessage(row.message_id as string))) await processMessage(row.message_id as string);
+      lastRun = new Date();
       await releaseDue();
     }
     // A worker that stopped mid-send leaves 'sending' rows: give them back after 10 minutes.
@@ -180,9 +194,28 @@ async function blockers(item: Row): Promise<string[]> {
   if (!f.governorate) out.push("المحافظة غير معروفة");
   const profile = (await loadProfiles()).find((p) => p.client_id === item.client_id);
   if (!profile) out.push("الجهة غير مضبوطة");
+  else if (item.template_id) return out;
   else if (!item.kind) out.push("نوع الاستعلام غير محدد");
   else if (!profile.templates[item.kind as CaseKind]) out.push(`لا يوجد نموذج «${KIND_LABELS[item.kind as CaseKind]}» لهذه الجهة`);
   return out;
+}
+
+/** An email waiting as «unknown sender» is read once its domain is linked (older ones go to review). */
+async function requeueUnknown(domains: string[]): Promise<number> {
+  if (!domains.length) return 0;
+  const waiting = await query(
+    `UPDATE mail_messages SET status='new'
+     WHERE status='unknown_sender' AND received_at > now() - interval '3 days'
+       AND EXISTS (SELECT 1 FROM unnest($1::text[]) d WHERE from_domain = d OR from_domain LIKE '%.' || d)
+     RETURNING message_id`,
+    [domains],
+  );
+  return waiting.length;
+}
+
+async function assertClientForm(templateId: string, clientId: string): Promise<void> {
+  const [form] = await query("SELECT client_id FROM form_templates WHERE template_id=$1", [templateId]);
+  if (!form || form.client_id !== clientId) throw ApiError.badRequest("النموذج ليس لهذه الجهة", { field: "template_id" });
 }
 
 export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
@@ -213,18 +246,56 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
         `SELECT count(*)::int AS count FROM mail_cases WHERE status='sent'
            AND updated_at >= date_trunc('day', now() AT TIME ZONE 'Africa/Cairo') AT TIME ZONE 'Africa/Cairo'`,
       );
+      const [attention] = await query(
+        `SELECT count(*)::int AS count FROM mail_messages m
+         WHERE m.status IN ('review','failed') AND NOT EXISTS (SELECT 1 FROM mail_cases n WHERE n.message_id = m.message_id)`,
+      );
       return ok({
+        attention: attention?.count ?? 0,
         inboxes: [...new Set([...configured, ...states.map((s) => s.inbox as string)])].map((name) => ({
           name,
           configured: configured.includes(name),
           ...(states.find((s) => s.inbox === name) ?? {}),
         })),
         ai: { configured: aiConfigured(), model: AI_MODEL },
+        intake_off: process.env.MAIL_INTAKE === "off",
         cases: Object.fromEntries(counts.map((c) => [c.status, { count: c.count, next_release: c.next_release }])),
         today: { ...(today[0] ?? {}), sent: sentToday[0]?.count ?? 0 },
         unknown_domains: unknown,
         rule: "من 8 صباحًا إلى 4 مساءً تُرسل فورًا، ومن 4 مساءً إلى 8 صباحًا تُجدول للساعة 8 صباحًا",
       });
+    }),
+  );
+
+  /** The whole chain tested on the server: nothing is sent, created or notified. */
+  router.post(
+    "/investigations/intake/check",
+    withPermission(MANAGE, async () =>
+      ok(
+        await runSystemCheck({
+          activeTemplate: deps.activeTemplate,
+          matchInvestigators: deps.matchInvestigators,
+          loopRanAt: () => lastRun,
+        }),
+      ),
+    ),
+  );
+
+  /** Links every client at once from the private list the administrator uploads. */
+  router.post(
+    "/investigations/intake/setup",
+    withPermission(MANAGE, async (context, auth) => {
+      const body = await readJson(context.req);
+      const { results, domains } = await setupClients(body.clients, body.auto_send === true, body.two_visits === true, auth.user.user_id);
+      const requeued = await requeueUnknown(domains);
+      await recordAudit({
+        event: "mail.profile_updated",
+        actorId: auth.user.user_id,
+        success: true,
+        context,
+        metadata: { setup: results.filter((item) => item.linked).map((item) => item.client), auto_send: body.auto_send === true },
+      });
+      return ok({ results, requeued });
     }),
   );
 
@@ -240,7 +311,9 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
            (SELECT count(*)::int FROM mail_cases x WHERE x.message_id = m.message_id) AS cases,
            (SELECT count(*)::int FROM mail_cases x WHERE x.message_id = m.message_id AND x.status IN ('review','failed')) AS waiting
          FROM mail_messages m LEFT JOIN form_clients c ON c.client_id = m.client_id
-         WHERE ($1::text IS NULL OR m.status = $1)
+         WHERE ($1::text IS NULL OR m.status = $1
+             OR ($1 = 'attention' AND m.status IN ('review','failed')
+                 AND NOT EXISTS (SELECT 1 FROM mail_cases n WHERE n.message_id = m.message_id)))
            AND ($2::text IS NULL OR m.subject ILIKE '%' || $2 || '%' OR m.from_address ILIKE '%' || $2 || '%')
          ORDER BY m.received_at DESC LIMIT 200`,
         [status || null, search || null],
@@ -293,8 +366,14 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
   router.post(
     "/investigations/intake/messages/:message_id/reprocess",
     withPermission(MANAGE, async (context) => {
-      const outcome = await processMessage(context.params.message_id ?? "");
-      return ok(outcome);
+      const id = context.params.message_id ?? "";
+      const [row] = await query("UPDATE mail_messages SET attempts=0 WHERE message_id=$1 RETURNING raw_path", [id]);
+      if (!row) throw ApiError.notFound("Email not found");
+      if (!row.raw_path && !(await refetchMessage(id))) {
+        const [after] = await query("SELECT status, reason FROM mail_messages WHERE message_id=$1", [id]);
+        return ok({ status: after?.status, reason: after?.reason, cases: 0 });
+      }
+      return ok(await processMessage(id));
     }),
   );
 
@@ -302,7 +381,7 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
     "/investigations/intake/messages/:message_id/ignore",
     withPermission(MANAGE, async (context, auth) => {
       const body = await readJson(context.req).catch(() => ({}) as Row);
-      await query("UPDATE mail_messages SET status='ignored', reason=$2 WHERE message_id=$1", [
+      await query("UPDATE mail_messages SET status='ignored', reason=$2, retry_at=NULL WHERE message_id=$1", [
         context.params.message_id,
         optionalText(body.reason, 300) ?? "تجاهلها مسؤول",
       ]);
@@ -314,13 +393,41 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
     }),
   );
 
+  /** The manual way when reading fails: a person typed in from the email. */
+  router.post(
+    "/investigations/intake/messages/:message_id/cases",
+    withPermission(MANAGE, async (context, auth) => {
+      const [message] = await query("SELECT message_id, subject, from_domain, client_id, status FROM mail_messages WHERE message_id=$1", [
+        context.params.message_id,
+      ]);
+      if (!message) throw ApiError.notFound("Email not found");
+      if (message.status === "processing") throw new ApiError(409, "INVALID_STATUS_TRANSITION", "البريد تتم قراءته الآن");
+      const profile = (await loadProfiles()).find((item) =>
+        message.client_id ? item.client_id === message.client_id : domainMatches(String(message.from_domain ?? ""), item.domains),
+      );
+      if (!profile) throw new ApiError(422, "CLIENT_NOT_LINKED", "اربط دومين المرسل بجهة أولًا من «جهات البريد»");
+      const fields = cleanFields({ national_id: findNationalId(String(message.subject ?? "")) }, {});
+      const [item] = await query(
+        `INSERT INTO mail_cases(message_id, client_id, fields, confidence, source, status, reason, reviewed_by)
+         VALUES($1,$2,$3::text::jsonb,1,'manual','review',$4,$5) RETURNING case_id`,
+        [message.message_id, profile.client_id, JSON.stringify(fields), "أُضيف يدويًا: أكمل البيانات", auth.user.user_id],
+      );
+      // No more automatic readings: a person has taken this email over.
+      await query("UPDATE mail_messages SET status='review', retry_at=NULL, client_id=$2 WHERE message_id=$1", [
+        message.message_id,
+        profile.client_id,
+      ]);
+      return ok({ case_id: item?.case_id });
+    }),
+  );
+
   router.get(
     "/investigations/intake/cases",
     withPermission(MANAGE, async (context) => {
       const status = context.url.searchParams.get("status") || "review";
       const rows = await query(
         `SELECT x.case_id, x.message_id, x.kind, x.fast, x.fields, x.confidence, x.doubts, x.source, x.status, x.reason,
-           x.release_at, x.investigation_id, x.updated_at, c.name AS client_name, m.subject, m.from_address, m.inbox,
+           x.release_at, x.investigation_id, x.updated_at, x.template_id, x.assignee_id, c.name AS client_name, m.subject, m.from_address, m.inbox,
            m.received_at, i.reference
          FROM mail_cases x JOIN mail_messages m ON m.message_id = x.message_id
          LEFT JOIN form_clients c ON c.client_id = x.client_id
@@ -344,10 +451,22 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
       const kind = body.kind === undefined ? item.kind : body.kind;
       if (kind !== null && !KINDS.includes(kind as CaseKind)) throw ApiError.badRequest("Unknown kind", { field: "kind" });
       const fields = cleanFields(body.fields, item.fields as Row);
+      const templateId = body.template_id === undefined ? item.template_id : optionalText(body.template_id, 64);
+      if (templateId) await assertClientForm(templateId as string, item.client_id as string);
+      const assigneeId = body.assignee_id === undefined ? item.assignee_id : optionalText(body.assignee_id, 64);
       const rows = await query(
-        `UPDATE mail_cases SET fields=$2::text::jsonb, kind=$3, fast=$4, updated_at=now() WHERE case_id=$1 RETURNING *`,
-        [context.params.case_id, JSON.stringify(fields), kind, typeof body.fast === "boolean" ? body.fast : item.fast],
+        `UPDATE mail_cases SET fields=$2::text::jsonb, kind=$3, fast=$4, template_id=$5, assignee_id=$6, updated_at=now()
+         WHERE case_id=$1 AND status IN ('review','failed','ready') RETURNING *`,
+        [
+          context.params.case_id,
+          JSON.stringify(fields),
+          kind,
+          typeof body.fast === "boolean" ? body.fast : item.fast,
+          templateId ?? null,
+          assigneeId ?? null,
+        ],
       );
+      if (!rows.length) throw new ApiError(409, "INVALID_STATUS_TRANSITION", "This case has already been sent");
       return ok({ case: rows[0], blockers: await blockers(rows[0]!) });
     }),
   );
@@ -358,20 +477,21 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
       const body = await readJson(context.req).catch(() => ({}) as Row);
       const [item] = await query("SELECT * FROM mail_cases WHERE case_id=$1", [context.params.case_id]);
       if (!item) throw ApiError.notFound("Case not found");
-      if (!["review", "failed"].includes(item.status as string)) {
+      if (!["review", "failed", "ready"].includes(item.status as string)) {
         throw new ApiError(409, "INVALID_STATUS_TRANSITION", "This case is not waiting for review");
       }
       const missing = await blockers(item);
       if (missing.length) throw new ApiError(422, "CASE_INCOMPLETE", missing.join("، "));
-      // «Send now» skips the night rule; otherwise the time rule of when the email arrived.
+      // «Send now» skips the night rule. Otherwise the time rules, and never at night by accident.
       const [message] = await query("SELECT received_at FROM mail_messages WHERE message_id=$1", [item.message_id]);
-      const ruled = releaseTime(new Date(message?.received_at as string)).at;
-      const at = body.send_now === true || ruled.getTime() < Date.now() ? new Date() : ruled;
-      await query(
+      const now = new Date();
+      const at = body.send_now === true ? now : sendTime(new Date(message?.received_at as string), now);
+      const approved = await query(
         `UPDATE mail_cases SET status='ready', release_at=$2, reason=NULL, reviewed_by=$3, reviewed_at=now(), updated_at=now()
-         WHERE case_id=$1`,
+         WHERE case_id=$1 AND status IN ('review','failed','ready') RETURNING case_id`,
         [context.params.case_id, at, auth.user.user_id],
       );
+      if (!approved.length) throw new ApiError(409, "INVALID_STATUS_TRANSITION", "This case has already been sent");
       await recordAudit({
         event: "mail.case_approved",
         actorId: auth.user.user_id,
@@ -448,8 +568,7 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
       for (const kind of KINDS) {
         const id = optionalText(given[kind], 64);
         if (!id) continue;
-        const [t] = await query("SELECT client_id FROM form_templates WHERE template_id=$1", [id]);
-        if (!t) throw ApiError.badRequest(`Unknown form for ${kind}`, { field: "templates" });
+        await assertClientForm(id, clientId);
         templates[kind] = id;
       }
       const level = async (code: unknown, fallback: string) => {
@@ -460,10 +579,10 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
       };
       await query(
         `INSERT INTO mail_client_profiles(client_id, domains, templates, fast_words, normal_level, fast_level, auto_send,
-           ignore_words, notes, active, updated_by, updated_at)
-         VALUES($1,$2,$3::text::jsonb,$4,$5,$6,$7,$8,$9,$10,$11,now())
+           ignore_words, notes, active, updated_by, two_visits, updated_at)
+         VALUES($1,$2,$3::text::jsonb,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
          ON CONFLICT (client_id) DO UPDATE SET domains=$2, templates=$3::text::jsonb, fast_words=$4, normal_level=$5,
-           fast_level=$6, auto_send=$7, ignore_words=$8, notes=$9, active=$10, updated_by=$11, updated_at=now()`,
+           fast_level=$6, auto_send=$7, ignore_words=$8, notes=$9, active=$10, updated_by=$11, two_visits=$12, updated_at=now()`,
         [
           clientId,
           domains,
@@ -476,14 +595,11 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
           optionalText(body.notes, 1000),
           body.active !== false,
           auth.user.user_id,
+          body.two_visits === true,
         ],
       );
       // Emails from these domains that waited as «unknown sender» are read now.
-      const waiting = await query(
-        "SELECT message_id FROM mail_messages WHERE status='unknown_sender' AND from_domain = ANY($1::text[]) AND received_at > now() - interval '3 days'",
-        [domains],
-      );
-      for (const row of waiting) await query("UPDATE mail_messages SET status='new' WHERE message_id=$1", [row.message_id]);
+      const requeued = await requeueUnknown(domains);
       await recordAudit({
         event: "mail.profile_updated",
         actorId: auth.user.user_id,
@@ -491,7 +607,7 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
         context,
         metadata: { client_id: clientId, domains, auto_send: body.auto_send !== false },
       });
-      return ok({ saved: true, requeued: waiting.length });
+      return ok({ saved: true, requeued });
     }),
   );
 
@@ -502,7 +618,7 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
     withPermission(MANAGE, async (context) => {
       const [row] = await query(
         `SELECT i.investigation_id, i.reference, i.subject_name, i.client_id, i.client_name, i.client_reference, i.form_title,
-           i.status, i.pdf_path, i.report_docx_path, i.mail_case_id, x.kind, x.fields, m.inbox, m.from_address, m.cc_addresses,
+           i.status, i.pdf_path, i.report_docx_path, i.mail_case_id, x.kind, x.fields, m.inbox, m.from_address, m.from_domain, m.to_addresses, m.cc_addresses, m.sender_verified,
            m.subject AS request_subject, m.header_message_id
          FROM investigations i LEFT JOIN mail_cases x ON x.case_id = i.mail_case_id
          LEFT JOIN mail_messages m ON m.message_id = x.message_id WHERE i.investigation_id=$1`,
@@ -523,9 +639,17 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
       return ok({
         draft: {
           inbox: row.inbox ?? configuredInboxes()[0]?.name ?? null,
-          to: row.from_address ? [row.from_address] : [],
-          cc: ((row.cc_addresses as string[] | null) ?? []).filter((a) => !/goldenpayservice\.com$/i.test(a)),
-          subject: row.request_subject ? `RE: ${row.request_subject}` : subject,
+          // Addresses come from the email only when the mail server confirmed who sent it.
+          to: row.sender_verified === true && row.from_address ? [row.from_address] : [],
+          // Colleagues of the sender who were on the request (never our own inboxes or strangers).
+          cc:
+            row.sender_verified === true
+              ? [...new Set([...((row.to_addresses as string[] | null) ?? []), ...((row.cc_addresses as string[] | null) ?? [])])].filter(
+                  (a) => a !== row.from_address && domainMatches(a.split("@")[1] ?? "", [String(row.from_domain ?? "")]),
+                )
+              : [],
+          // One report per email, named as the team does; In-Reply-To keeps it in the request's thread.
+          subject,
           body: `السادة / ${row.client_name ?? ""}\nتحية طيبة وبعد،\n\nمرفق تقرير الاستعلام عن العميل/ ${row.subject_name}${nid ? ` (${nid})` : ""}.\n\nوتفضلوا بقبول فائق الاحترام،\nجولدن باي للخدمات`,
           in_reply_to: row.header_message_id ?? null,
           attachments: [
@@ -578,9 +702,12 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
       if (!attachments.length) throw new ApiError(409, "REPORT_NOT_READY", "The report file is not ready yet");
       const inReplyTo = optionalText(body.in_reply_to, 500);
       let smtpId: string | null = null;
+      let savedToSent = false;
       let error: string | null = null;
       try {
-        smtpId = await sendFromInbox({ inbox, to, cc, subject, text, inReplyTo, attachments });
+        const sent = await sendFromInbox({ inbox, to, cc, subject, text, inReplyTo, attachments });
+        smtpId = sent.messageId;
+        savedToSent = sent.savedToSent;
       } catch (err) {
         error = (err instanceof Error ? err.message : String(err)).slice(0, 500);
       }
@@ -611,7 +738,7 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
         metadata: { investigation_id: context.params.id, emailed_to: to.length, cc: cc.length, inbox },
       });
       if (error) throw new ApiError(502, "MAIL_SEND_FAILED", `لم يُرسل البريد: ${error}`);
-      return ok({ sent: true });
+      return ok({ sent: true, saved_to_sent: savedToSent });
     }),
   );
 }

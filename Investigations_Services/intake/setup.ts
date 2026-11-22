@@ -1,0 +1,128 @@
+import { query } from "../../IdentityAcess_Services/Config/db.ts";
+import { ApiError } from "../../IdentityAcess_Services/Utils/http.ts";
+import { INVESTIGATION_TYPES } from "../../Shared/templates/inventory.ts";
+import { normalizeText, type CaseKind } from "./rules.ts";
+
+/**
+ * Linking every client in one step: an administrator uploads the private list of which
+ * client writes from which domain, and each client's active forms are picked by their type.
+ * The list never lives in the code (this repository is public).
+ */
+
+type Row = Record<string, unknown>;
+
+interface FormRow {
+  template_id: string;
+  title: string;
+  investigation_type?: string | null;
+}
+
+const ONE_VISIT: [kind: CaseKind, type: string, plainTitle: RegExp][] = [
+  ["home", "residence", /^(استعلام |تقرير |نموذج )?(ال)?(سكن|منزل)$/],
+  ["work", "employment", /^(استعلام |تقرير |نموذج )?(ال)?عمل$/],
+  ["home_work", "residence_employment", /^(استعلام |تقرير |نموذج )?(ال)?(سكن|منزل) ?و ?(ال)?عمل$/],
+  ["finishing", "finishing", /^(استعلام |تقرير |نموذج )?(ال)?تشطيب( وحده)?$/],
+];
+
+/**
+ * The form for each kind of request, only where there is no doubt which one it is. The others
+ * are chosen by an administrator (in the settings or on the case).
+ */
+export function pickForms(forms: FormRow[]): Partial<Record<CaseKind, string>> {
+  const typed = forms.map((form) => ({
+    ...form,
+    type: form.investigation_type ?? INVESTIGATION_TYPES.find((type) => type.test.test(form.title))?.code ?? null,
+  }));
+  const picked: Partial<Record<CaseKind, string>> = {};
+  for (const [kind, type, plainTitle] of ONE_VISIT) {
+    const options = typed.filter((form) => form.type === type);
+    const plain = options.filter((form) => plainTitle.test(normalizeText(form.title)));
+    const choice = options.length === 1 ? options[0] : plain.length === 1 ? plain[0] : undefined;
+    if (choice) picked[kind] = choice.template_id;
+  }
+  const business = typed.filter((form) => ["company", "sme", "site_visit"].includes(form.type ?? ""));
+  if (business.length === 1) picked.business = business[0]!.template_id;
+  return picked;
+}
+
+export interface SetupResult {
+  client: string;
+  name: string | null;
+  linked: boolean;
+  domains: string[];
+  kinds: CaseKind[];
+  problem: string | null;
+}
+
+export async function setupClients(
+  input: unknown,
+  autoSend: boolean,
+  twoVisits: boolean,
+  actorId: string,
+): Promise<{ results: SetupResult[]; domains: string[] }> {
+  if (!Array.isArray(input) || !input.length || input.length > 100) {
+    throw ApiError.badRequest("الملف يجب أن يحتوي على قائمة clients", { field: "clients" });
+  }
+  const results: SetupResult[] = [];
+  const linked: string[] = [];
+  for (const entry of input as Row[]) {
+    const client = String(entry?.client ?? "").trim().slice(0, 64);
+    const domains = [
+      ...new Set(
+        (Array.isArray(entry?.domains) ? entry.domains : [])
+          .map((domain) => String(domain).trim().toLowerCase().replace(/^.*@/, ""))
+          // A public suffix («com.eg») would claim every company under it.
+          .filter((domain) => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain) && !/^(com|co|org|net|gov|edu)\.[a-z]{2}$/.test(domain)),
+      ),
+    ].slice(0, 40);
+    const result: SetupResult = { client, name: null, linked: false, domains, kinds: [], problem: null };
+    results.push(result);
+
+    const [found] = await query("SELECT name FROM form_clients WHERE client_id=$1", [client]);
+    if (!found) {
+      result.problem = "الجهة غير موجودة في النظام";
+      continue;
+    }
+    result.name = found.name as string;
+    if (!domains.length) {
+      result.problem = "لا يوجد دومين صحيح";
+      continue;
+    }
+    const taken = await query(
+      `SELECT c.name, d FROM mail_client_profiles p JOIN form_clients c ON c.client_id = p.client_id, unnest(p.domains) d
+       WHERE p.client_id <> $1 AND d = ANY($2::text[])`,
+      [client, domains],
+    );
+    if (taken.length) {
+      result.problem = `الدومين ${taken[0]!.d} مربوط بـ ${taken[0]!.name}`;
+      continue;
+    }
+    const forms = (await query(
+      `SELECT t.template_id, t.title, t.investigation_type FROM form_templates t
+       JOIN template_versions v ON v.version_id = t.active_version_id AND v.status = 'active'
+       WHERE t.active AND t.client_id = $1 ORDER BY t.title`,
+      [client],
+    )) as unknown as FormRow[];
+    const [existing] = await query("SELECT domains, templates FROM mail_client_profiles WHERE client_id=$1", [client]);
+    const active = new Set(forms.map((form) => form.template_id));
+    // A form an administrator already chose stays, as long as it is still active.
+    const chosen = Object.fromEntries(
+      Object.entries((existing?.templates as Record<string, string> | undefined) ?? {}).filter(([, id]) => active.has(id)),
+    );
+    const templates = { ...pickForms(forms), ...chosen };
+    const merged = [...new Set([...((existing?.domains as string[] | undefined) ?? []), ...domains])];
+    await query(
+      `INSERT INTO mail_client_profiles(client_id, domains, templates, auto_send, two_visits, active, updated_by, updated_at)
+       VALUES($1,$2,$3::text::jsonb,$4,$5,true,$6,now())
+       ON CONFLICT (client_id) DO UPDATE SET domains=$2, templates=$3::text::jsonb, auto_send=$4, two_visits=$5, active=true,
+         updated_by=$6, updated_at=now()`,
+      [client, merged, JSON.stringify(templates), autoSend, twoVisits, actorId],
+    );
+    result.linked = true;
+    result.domains = merged;
+    result.kinds = Object.keys(templates) as CaseKind[];
+    if (!result.kinds.length) result.problem = "لا يوجد نموذج معتمد مناسب: يُختار لكل حالة";
+    linked.push(...merged);
+  }
+  return { results, domains: linked };
+}

@@ -372,6 +372,13 @@ ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS sender_verified boolean;
 -- When reading started, so only a reading that really stopped is picked up again.
 ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS processing_since timestamptz;
 
+-- A failed reading or saving is tried again.
+ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0;
+ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS retry_at timestamptz;
+
+-- «سكن وعمل» going out by itself as two visits means two prices and two pays: only when approved.
+ALTER TABLE mail_client_profiles ADD COLUMN IF NOT EXISTS two_visits boolean NOT NULL DEFAULT false;
+
 -- One person to investigate, read from an email (an Excel row, a body form, a scanned page).
 CREATE TABLE IF NOT EXISTS mail_cases (
   case_id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -397,6 +404,10 @@ CREATE TABLE IF NOT EXISTS mail_cases (
 );
 CREATE INDEX IF NOT EXISTS idx_mail_cases_status ON mail_cases (status, release_at);
 CREATE INDEX IF NOT EXISTS idx_mail_cases_message ON mail_cases (message_id);
+
+-- Chosen by an administrator on the case: the form, and an investigator to send it to.
+ALTER TABLE mail_cases ADD COLUMN IF NOT EXISTS template_id text;
+ALTER TABLE mail_cases ADD COLUMN IF NOT EXISTS assignee_id text;
 
 -- The case an email produced, for the reply that carries its report back.
 ALTER TABLE investigations ADD COLUMN IF NOT EXISTS mail_case_id text;

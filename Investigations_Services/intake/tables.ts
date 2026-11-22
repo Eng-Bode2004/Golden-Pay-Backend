@@ -230,3 +230,47 @@ export function looksComplete(item: ExtractedCase): boolean {
       !item.doubts.length,
   );
 }
+
+/** A CSV file as a grid (quoted cells may hold commas and line breaks). */
+export function csvGrid(text: string): string[][] {
+  const source = text.replace(/^\uFEFF/, "");
+  const firstLine = source.split("\n", 1)[0] ?? "";
+  const separator = !firstLine.includes(",") && firstLine.includes(";") ? ";" : ",";
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let quoted = false;
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i]!;
+    if (quoted) {
+      if (char !== '"') cell += char;
+      else if (source[i + 1] === '"') {
+        cell += '"';
+        i += 1;
+      } else quoted = false;
+    } else if (char === '"') quoted = true;
+    else if (char === separator) {
+      row.push(cell);
+      cell = "";
+    } else if (char === "\n") {
+      rows.push([...row, cell]);
+      row = [];
+      cell = "";
+    } else if (char !== "\r") cell += char;
+  }
+  if (cell || row.length) rows.push([...row, cell]);
+  return rows;
+}
+
+/** Columns only a follow-up, billing or result sheet has, never a list of new requests. */
+const TRACKER_HEADER =
+  /^(ال)?(سعر|قيمه|مندوب|موقف|خصم|مراجع|منسق|مستعلم|نتيجه|تاخير)$|^اسم (ال)?(مراجع|مندوب|مستعلم)$|^تاريخ (ال)?(ارسال|زياره|خروج|الغاء)|^تاريخ ارسال|^حاله الطلب|^(price|amount|status|result)$/;
+
+/** A sheet that tracks or bills cases already sent. */
+export function isTrackerGrid(rows: string[][]): boolean {
+  return rows.slice(0, 12).some((row) => {
+    const filled = row.filter((cell) => cell.trim());
+    if (filled.length < 3 || !filled.some((cell) => fieldOfHeader(cell) === "subject_name")) return false;
+    return filled.some((cell) => TRACKER_HEADER.test(normalizeText(cell)));
+  });
+}

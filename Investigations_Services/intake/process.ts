@@ -1,30 +1,41 @@
 import { query } from "../../IdentityAcess_Services/Config/db.ts";
 import { getStoredFile } from "../../IdentityAcess_Services/Utils/files.ts";
 import { canonicalNames } from "../../Shared/places.ts";
-import { nameKey } from "../../Shared/work-area.ts";
-import { docxText, readXlsx } from "../../Shared/xlsx.ts";
-import { aiConfigured, readWithAi, type AiInput } from "./ai.ts";
+import { readXlsx } from "../../Shared/xlsx.ts";
+import { addressWords, buildAddressIndex, findPlace, type AddressIndex, type PlaceName } from "./address-place.ts";
+import { aiConfigured, readWithAi } from "./ai.ts";
+import { gatherFiles, isCsv, isDecoration, isPdf, isXlsx, type Attachment } from "./files.ts";
 import {
+  aboutEarlierCases,
+  cleanText,
   DEFAULT_FAST_WORDS,
   DEFAULT_IGNORE_WORDS,
-  isForward,
   detectFast,
   domainMatches,
   findNationalId,
   freshBody,
+  isForward,
   isNationalId,
   isReplySubject,
   isSystemMail,
-  kindsOverlap,
   KIND_LABELS,
+  kindOfRow,
+  kindsOverlap,
   normalizeMobile,
   normalizeText,
-  releaseTime,
   requestKind,
   samePerson,
+  sendTime,
+  STALE_HOURS,
+  visitsFor,
   type CaseKind,
 } from "./rules.ts";
-import { casesFromGrid, htmlTables, looksComplete, type ExtractedCase } from "./tables.ts";
+import { casesFromGrid, csvGrid, htmlTables, isTrackerGrid, looksComplete, type ExtractedCase } from "./tables.ts";
+
+/**
+ * One stored email → the people to investigate. A case goes out by itself only when nothing
+ * is in doubt; everything else waits for an administrator with the reason in Arabic.
+ */
 
 type Row = Record<string, unknown>;
 
@@ -37,87 +48,44 @@ export interface Profile {
   normal_level: string;
   fast_level: string;
   auto_send: boolean;
+  two_visits: boolean;
   ignore_words: string[];
 }
 
 export async function loadProfiles(): Promise<Profile[]> {
   return (await query(
     `SELECT p.client_id, c.name AS client_name, p.domains, p.templates, p.fast_words, p.normal_level, p.fast_level,
-       p.auto_send, p.ignore_words
+       p.auto_send, p.two_visits, p.ignore_words
      FROM mail_client_profiles p JOIN form_clients c ON c.client_id = p.client_id WHERE p.active`,
   )) as unknown as Profile[];
 }
 
 /** How sure the AI reading must be before a case goes out without a person looking. */
 const AUTO_CONFIDENCE = Number(process.env.MAIL_AUTO_CONFIDENCE || 0.85);
+/** More rows than any client's daily batch: a tracker or a monthly list, not new requests. */
+const BATCH_LIMIT = 80;
+/** A failed reading (AI or storage down) is tried again after these many minutes. */
+const RETRY_MINUTES = [5, 30, 120];
 
-// ───────────── places inside a free-text address ─────────────
+// ───────────── places ─────────────
 
-interface PlaceIndex {
-  at: number;
-  governorates: { key: string; name: string }[];
-  districts: { key: string; name: string; governorate: string }[];
-}
-let places: PlaceIndex | null = null;
+let places: { at: number; index: AddressIndex; governorates: Set<string> } | null = null;
 
-async function placeIndex(): Promise<PlaceIndex> {
+async function placeIndex() {
   if (places && Date.now() - places.at < 10 * 60_000) return places;
-  const rows = await query(
+  const rows = (await query(
     `SELECT d.name, d.level, g.name AS governorate FROM geo_locations d
      LEFT JOIN geo_locations g ON g.location_id = d.parent_id WHERE d.level IN (1, 2)`,
-  );
+  )) as unknown as PlaceName[];
   places = {
     at: Date.now(),
-    governorates: rows.filter((r) => r.level === 1).map((r) => ({ key: nameKey(r.name as string), name: r.name as string })),
-    districts: rows
-      .filter((r) => r.level === 2 && r.governorate)
-      .map((r) => ({ key: nameKey(r.name as string), name: r.name as string, governorate: r.governorate as string })),
+    index: buildAddressIndex(rows),
+    governorates: new Set(rows.filter((row) => row.level === 1).map((row) => row.name)),
   };
   return places;
 }
 
-/** The governorate and district named inside an address, when the address names them. */
-export async function placeOfAddress(address: string): Promise<{ governorate: string | null; district: string | null }> {
-  const index = await placeIndex();
-  const text = ` ${nameKey(address)} `;
-  const contains = (key: string) => key.length >= 3 && text.includes(` ${key} `);
-  const governorate = index.governorates.filter((g) => contains(g.key)).sort((a, b) => b.key.length - a.key.length)[0];
-  const districts = index.districts
-    .filter((d) => contains(d.key) && (!governorate || d.governorate === governorate.name))
-    .sort((a, b) => b.key.length - a.key.length);
-  const district = districts[0];
-  // A district name shared by two governorates (and none named) is not a guess we make.
-  if (district && !governorate && districts.some((d) => d.key === district.key && d.governorate !== district.governorate)) {
-    return { governorate: null, district: null };
-  }
-  return { governorate: governorate?.name ?? district?.governorate ?? null, district: district?.name ?? null };
-}
-
 // ───────────── reading one email ─────────────
-
-const IMAGE_TYPES: Record<string, AiInput["images"][number]["media_type"]> = {
-  "image/png": "image/png",
-  "image/jpeg": "image/jpeg",
-  "image/jpg": "image/jpeg",
-  "image/gif": "image/gif",
-  "image/webp": "image/webp",
-};
-
-interface Attachment {
-  index: number;
-  name: string;
-  type: string;
-  bytes: number;
-  path: string;
-  inline?: boolean;
-}
-
-/** Logos, social icons and signatures: small images, or the same picture every email carries. */
-function isDecoration(file: Attachment): boolean {
-  if (!IMAGE_TYPES[file.type]) return false;
-  if (file.bytes < 15_000) return true;
-  return /^(facebook|fb_|youtube|linkedin|instagram|twitter|logo|.*_logo)/i.test(file.name);
-}
 
 const htmlToText = (value: string) =>
   value
@@ -128,6 +96,7 @@ const htmlToText = (value: string) =>
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
+    .replace(/&#(\d{1,6});/g, (_, n) => String.fromCodePoint(Math.min(Number(n), 0x10ffff)))
     .replace(/[ \t]+/g, " ")
     .replace(/\n\s*\n+/g, "\n");
 
@@ -137,8 +106,11 @@ export interface ProcessOutcome {
   cases: number;
 }
 
-/** Turns one stored email into cases (or a clear reason why not). Safe to run again. */
-export async function processMessage(messageId: string): Promise<ProcessOutcome> {
+/**
+ * Turns one stored email into cases (or a clear reason why not). Safe to run again.
+ * `rethrow` is for the system check, which needs the real error.
+ */
+export async function processMessage(messageId: string, options: { rethrow?: boolean } = {}): Promise<ProcessOutcome> {
   // One reader at a time: the timer and «read again» never work on the same email together.
   const [message] = await query(
     `UPDATE mail_messages SET status='processing', processing_since=now()
@@ -148,18 +120,28 @@ export async function processMessage(messageId: string): Promise<ProcessOutcome>
   if (!message) return { status: "processing", reason: null, cases: 0 };
   try {
     const outcome = await read(message);
-    await query("UPDATE mail_messages SET status=$2, reason=$3, processed_at=now() WHERE message_id=$1", [
-      messageId,
-      outcome.status,
-      outcome.reason,
-    ]);
+    await query(
+      "UPDATE mail_messages SET status=$2, reason=$3, processed_at=now(), attempts=0, retry_at=NULL WHERE message_id=$1",
+      [messageId, outcome.status, outcome.reason],
+    );
     return outcome;
   } catch (error) {
-    const reason = `تعذّرت قراءة البريد: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500);
-    await query("UPDATE mail_messages SET status='failed', reason=$2, processed_at=now() WHERE message_id=$1", [messageId, reason]);
+    if (options.rethrow) throw error;
+    const attempt = Number(message.attempts ?? 0);
+    const wait = RETRY_MINUTES[attempt];
+    const detail = error instanceof Error ? error.message : String(error);
+    const next = wait === undefined ? "توقفت المحاولات: أضف الأشخاص يدويًا" : `تُعاد المحاولة بعد ${wait} دقيقة`;
+    const reason = cleanText(`تعذّرت قراءة البريد (${next}): ${detail}`.slice(0, 500));
+    await query(
+      `UPDATE mail_messages SET status='failed', reason=$2, processed_at=now(), attempts=$3, retry_at=$4
+       WHERE message_id=$1`,
+      [messageId, reason, attempt + 1, wait === undefined ? null : new Date(Date.now() + wait * 60_000)],
+    );
     return { status: "failed", reason, cases: 0 };
   }
 }
+
+type Found = ExtractedCase & { source: string };
 
 async function read(message: Row): Promise<ProcessOutcome> {
   const subject = String(message.subject ?? "");
@@ -169,11 +151,11 @@ async function read(message: Row): Promise<ProcessOutcome> {
   const profiles = await loadProfiles();
   const domain = (message.from_domain as string | null) ?? "";
   const profile = profiles.find((p) => domainMatches(domain, p.domains)) ?? null;
-  if (profile) {
-    await query("UPDATE mail_messages SET client_id=$2 WHERE message_id=$1", [message.message_id, profile.client_id]);
-    await learnContacts(profile.client_id, message);
-  }
   if (!profile) return { status: "unknown_sender", reason: `الدومين ${domain || "—"} غير مربوط بأي جهة`, cases: 0 };
+  await query("UPDATE mail_messages SET client_id=$2 WHERE message_id=$1", [message.message_id, profile.client_id]);
+  // A forged sender never becomes an address that reports are sent to.
+  if (message.sender_verified === true) await learnContacts(profile.client_id, message);
+
   // One email sent to two of our inboxes is one request.
   if (message.header_message_id) {
     const [copy] = await query(
@@ -182,8 +164,9 @@ async function read(message: Row): Promise<ProcessOutcome> {
     );
     if (copy) return { status: "ignored", reason: `نسخة من بريد وصل على ${copy.inbox}`, cases: 0 };
   }
-  // Replies in a thread are conversation (questions, reminders, complaints), never new cases.
-  if (isReplySubject(subject)) return { status: "reply", reason: "رد على رسالة سابقة", cases: 0 };
+  // Replies are conversation, except that some clients send each day's batch as a reply in
+  // their monthly thread: a spreadsheet in a reply is read, and a person confirms it is new.
+  const replied = isReplySubject(subject);
 
   const rawBody = String(message.body_text ?? "");
   const isHtml = /<table/i.test(rawBody);
@@ -191,81 +174,95 @@ async function read(message: Row): Promise<ProcessOutcome> {
   const plain = isHtml ? htmlToText(rawBody) : rawBody;
   // A forwarded request lives below the forward line; a direct one above any quoted history.
   const bodyText = forwarded ? plain.trim() : freshBody(plain);
-  const requestText = `${subject}\n${bodyText}`;
   const ignoreWords = [...DEFAULT_IGNORE_WORDS, ...profile.ignore_words];
   if (ignoreWords.some((word) => normalizeText(subject).includes(normalizeText(word)))) {
     return { status: "ignored", reason: "يحتوي على كلمة تجاهل لهذه الجهة", cases: 0 };
   }
 
   const emailKind = requestKind(subject, plain);
-  const emailFast = detectFast(requestText, profile.fast_words.length ? profile.fast_words : DEFAULT_FAST_WORDS);
+  const emailFast = detectFast(`${subject}\n${bodyText}`, profile.fast_words.length ? profile.fast_words : DEFAULT_FAST_WORDS);
   const attachments = ((message.attachments as Attachment[]) ?? []).filter((file) => !isDecoration(file));
+  if (replied && !attachments.some((file) => isXlsx(file) || isCsv(file) || isPdf(file) || /\.docx?$/i.test(file.name))) {
+    return { status: "reply", reason: "رد على رسالة سابقة", cases: 0 };
+  }
+  // Reasons that hold every case of this email for a person.
+  const holds: string[] = [];
 
-  // 1. Tables: Excel files and tables in the body are read exactly, without AI.
-  let cases: (ExtractedCase & { source: string })[] = [];
-  for (const file of attachments) {
-    if (!/\.xlsx$/i.test(file.name) && !file.type.includes("spreadsheetml")) continue;
+  // 1. Tables: Excel, CSV and tables in the body are read exactly, without AI.
+  let cases: Found[] = [];
+  for (const file of attachments.filter((item) => isXlsx(item) || isCsv(item))) {
+    const bytes = await getStoredFile(file.path);
     try {
-      const bytes = await getStoredFile(file.path);
-      for (const sheet of readXlsx(bytes)) {
-        cases.push(...casesFromGrid(sheet.rows).map((item) => ({ ...item, source: `excel:${file.name}` })));
+      const grids = isXlsx(file) ? readXlsx(bytes).map((sheet) => sheet.rows) : [csvGrid(new TextDecoder().decode(bytes))];
+      for (const grid of grids) {
+        const found = casesFromGrid(grid);
+        if (found.length && isTrackerGrid(grid)) holds.push("جدول متابعة أو حساب لطلبات سابقة");
+        cases.push(...found.map((item) => ({ ...item, source: `excel:${file.name}` })));
       }
-    } catch (error) {
-      console.error("mail.xlsx_failed", file.name, error instanceof Error ? error.message : error);
+    } catch {
+      holds.push(`تعذّرت قراءة ملف ${file.name}`);
     }
   }
-  if (isHtml) {
+  // A reply's tables are the quoted history; only the spreadsheets it attaches can be new.
+  if (isHtml && !replied) {
     for (const grid of htmlTables(forwarded ? rawBody : freshBodyHtml(rawBody))) {
       cases.push(...casesFromGrid(grid).map((item) => ({ ...item, source: "body-table" })));
     }
   }
-  let aiUsed = false;
 
   // 2. Everything else (handwritten photos, scans, PDFs, free text): the AI reader.
   // Rows read exactly are never replaced by a model's reading: incomplete rows go to review.
-  if (!cases.some(looksComplete)) {
-    if (!aiConfigured()) {
-      if (!cases.length) return { status: "review", reason: "يحتاج قراءة يدوية (القراءة الذكية غير مفعّلة)", cases: 0 };
-    } else {
-      const input: AiInput = { clientName: profile.client_name, subject, body: bodyText, images: [], pdfs: [], texts: [] };
-      for (const file of attachments) {
-        const bytes = await getStoredFile(file.path).catch(() => null);
-        if (!bytes) continue;
-        const mediaType = IMAGE_TYPES[file.type.toLowerCase()];
-        if (mediaType && input.images.length < 12) input.images.push({ media_type: mediaType, data: bytes, name: file.name });
-        else if ((file.type === "application/pdf" || /\.pdf$/i.test(file.name)) && input.pdfs.length < 6 && bytes.length < 20_000_000) {
-          input.pdfs.push({ data: bytes, name: file.name });
-        } else if (/\.docx$/i.test(file.name)) {
-          try {
-            input.texts.push({ name: file.name, text: docxText(bytes) });
-          } catch {
-            // an unreadable Word file is listed for the reviewer, not fatal
-          }
-        }
+  if (replied) {
+    if (!cases.length) return { status: "review", reason: "رد فيه مرفق: إن كان طلبًا جديدًا أضف الشخص", cases: 0 };
+    holds.push("وصل داخل رد: تأكد أنه طلب جديد");
+  } else if (cases.some(looksComplete)) {
+    if (attachments.some(isPdf)) holds.push("في البريد ملفات PDF لم تُقرأ مع الجدول");
+  } else if (!aiConfigured()) {
+    if (!cases.length) return { status: "review", reason: "يحتاج قراءة يدوية (القراءة الذكية غير مفعّلة): أضف الأشخاص", cases: 0 };
+  } else if (cases.length <= BATCH_LIMIT) {
+    const { unread, ...files } = await gatherFiles(attachments, getStoredFile);
+    if (unread.length) holds.push(`مرفقات لم تُقرأ: ${unread.slice(0, 4).join(" / ")}`);
+    const texts = [...files.texts];
+    // Tables already read are given to the model as text, so it does not read them twice.
+    if (cases.length) {
+      texts.push({ name: "rows already read from tables", text: JSON.stringify(cases.map(({ source: _s, ...row }) => row)) });
+    }
+    const result = await readWithAi({ clientName: profile.client_name, subject, body: bodyText, ...files, texts });
+    await query("UPDATE mail_messages SET ai_used=true WHERE message_id=$1", [message.message_id]);
+    if (!result.is_case_request && !cases.length) {
+      // Dropping a request is worse than one extra look, so an unread file always gets one.
+      return unread.length
+        ? { status: "review", reason: holds.join("، "), cases: 0 }
+        : { status: "ignored", reason: result.not_case_reason || "ليست طلب استعلام", cases: 0 };
+    }
+    if (result.cases.length) cases = result.cases.map((item) => ({ ...item, doubts: [...(item.doubts ?? [])], source: "ai" }));
+    // Clients that type the ID in the subject: the typed one beats a reading of handwriting.
+    const typedId = findNationalId(subject);
+    const only = cases.length === 1 ? cases[0]! : null;
+    if (only?.source === "ai" && typedId) {
+      if (only.national_id && findNationalId(only.national_id) !== typedId) {
+        only.doubts.push("الرقم القومي في الصورة يختلف عن الموضوع");
       }
-      // Tables already read are given to the model as text, so it does not read them twice.
-      if (cases.length) {
-        input.texts.push({ name: "rows already read from tables", text: JSON.stringify(cases.map(({ source: _s, ...c }) => c)) });
-      }
-      const result = await readWithAi(input);
-      aiUsed = true;
-      await query("UPDATE mail_messages SET ai_used=true WHERE message_id=$1", [message.message_id]);
-      if (!result.is_case_request && !cases.length) {
-        return { status: "ignored", reason: result.not_case_reason || "ليست طلب استعلام", cases: 0 };
-      }
-      if (result.cases.length) {
-        cases = result.cases.map((item) => ({
-          ...item,
-          doubts: item.doubts ?? [],
-          source: "ai",
-        }));
-      }
+      only.national_id = typedId;
     }
   }
-  if (!cases.length) return { status: "review", reason: "لم يُعثر على أشخاص في البريد", cases: 0 };
+  if (!cases.length) {
+    return { status: "review", reason: [...holds, "لم يُعثر على أشخاص في البريد: أضفهم يدويًا"].join("، "), cases: 0 };
+  }
 
-  // 3. Each person becomes a case: checked, placed, timed.
-  await query("DELETE FROM mail_cases WHERE message_id=$1 AND status IN ('review','ready','failed')", [message.message_id]);
+  if (cases.length > BATCH_LIMIT) holds.push(`قائمة كبيرة (${cases.length}): غالبًا ليست طلبات جديدة`);
+  if (aboutEarlierCases(subject)) holds.push("الموضوع عن طلبات سابقة (تذكير أو تعديل أو متابعة)");
+  if (message.sender_verified !== true) holds.push("لم يؤكد خادم البريد هوية المرسل");
+  if (!profile.auto_send) holds.push("هذه الجهة مضبوطة على المراجعة اليدوية");
+  const now = new Date();
+  const received = new Date(message.received_at as string);
+  if (now.getTime() - received.getTime() > STALE_HOURS * 3_600_000) {
+    holds.push("بريد قديم: تأكد أنه لم يُسجَّل يدويًا");
+  }
+  const releaseAt = sendTime(received, now);
+
+  // 3. Each visit becomes a case: checked, placed, timed.
+  await query("DELETE FROM mail_cases WHERE message_id=$1 AND status IN ('review','ready','failed') AND source IS DISTINCT FROM 'manual'", [message.message_id]);
   // Reading again never repeats a person already sent or rejected from this email.
   const handled = await query("SELECT kind, fields FROM mail_cases WHERE message_id=$1", [message.message_id]);
   const earlier = await query(
@@ -273,55 +270,76 @@ async function read(message: Row): Promise<ProcessOutcome> {
        AND created_at > now() - interval '30 days'`,
     [profile.client_id, message.message_id],
   );
-  const inThisEmail: { kind: CaseKind | null; fields: Awaited<ReturnType<typeof placed>> }[] = [];
+  // While the team still books some requests by hand, those must not be sent a second time.
+  const byHand = await query(
+    `SELECT subject_name FROM investigations WHERE client_id=$1 AND source <> 'email' AND status <> 'cancelled'
+       AND created_at > now() - interval '30 days'`,
+    [profile.client_id],
+  );
+  const inThisEmail: { kind: CaseKind | null; fields: CaseFields }[] = [];
   let added = 0;
-  const received = new Date(message.received_at as string);
   let ready = 0;
   for (const item of cases) {
-    const kind = item.kind ?? emailKind;
-    const fast = item.fast || emailFast;
-    const fields = await placed(item, kind);
-    const repeats = (other: { kind?: unknown; fields?: unknown }) =>
-      samePerson(fields, other.fields as Record<string, unknown>) && kindsOverlap(kind, (other.kind as CaseKind | null) ?? null);
-    if (handled.some(repeats)) continue;
-    const twin = inThisEmail.filter(repeats);
-    // The same row twice (the body table and its Excel copy) is one case.
-    if (twin.some((other) => other.kind === kind && other.fields.address === fields.address)) continue;
-    inThisEmail.push({ kind, fields });
-    added += 1;
-    const reasons = [...item.doubts];
-    if (twin.length) reasons.push("الشخص مكرر في نفس البريد");
-    if (earlier.some(repeats)) reasons.push("طلب مكرر محتمل: وصل لنفس الشخص خلال 30 يومًا");
-    if (message.sender_verified !== true) reasons.push("لم يؤكد خادم البريد هوية المرسل");
-    if (aiUsed && item.source === "ai" && item.confidence < AUTO_CONFIDENCE) reasons.push("القراءة غير مؤكدة");
-    if (!fields.subject_name) reasons.push("لا يوجد اسم");
-    if (!fields.address) reasons.push("لا يوجد عنوان");
-    if (fields.national_id && !isNationalId(fields.national_id)) reasons.push("الرقم القومي غير صحيح");
-    if (!fields.governorate) reasons.push("المحافظة غير معروفة");
-    if (!kind) reasons.push("نوع الاستعلام غير محدد");
-    else if (!profile.templates[kind]) reasons.push(`لا يوجد نموذج «${KIND_LABELS[kind]}» لهذه الجهة`);
-    if (!profile.auto_send) reasons.push("هذه الجهة مضبوطة على المراجعة اليدوية");
-    const unique = [...new Set(reasons)];
-    const status = unique.length ? "review" : "ready";
-    const release = releaseTime(received);
-    await query(
-      `INSERT INTO mail_cases(message_id, client_id, kind, fast, fields, confidence, doubts, source, status, reason, release_at)
-       VALUES($1,$2,$3,$4,$5::text::jsonb,$6,$7,$8,$9,$10,$11)`,
-      [
-        message.message_id,
-        profile.client_id,
-        kind,
-        fast,
-        JSON.stringify(fields),
-        Math.max(0, Math.min(1, item.confidence ?? 0)),
-        item.doubts,
-        item.source,
-        status,
-        unique.join("، ") || null,
-        release.at,
-      ],
-    );
-    if (status === "ready") ready += 1;
+    const fromTable = item.source !== "ai";
+    const stated = item.kind ?? emailKind;
+    const asked = stated ?? (fromTable ? kindOfRow(item) : null);
+    const visits = visitsFor(asked, profile.templates);
+    for (const kind of visits) {
+      const split = visits.length > 1;
+      const { fields, doubts } = await placed(item, kind, split);
+      const repeats = (other: { kind?: unknown; fields?: unknown }) =>
+        samePerson(fields, other.fields as Record<string, unknown>) &&
+        kindsOverlap(kind, (other.kind as CaseKind | null) ?? null);
+      if (handled.some(repeats)) continue;
+      const twin = inThisEmail.filter(repeats);
+      // The same row twice (the body table and its Excel copy) is one case.
+      const sameAddress = (other: string | null) => addressWords(other ?? "").join(" ") === addressWords(fields.address ?? "").join(" ");
+      if (twin.some((other) => other.kind === kind && sameAddress(other.fields.address))) continue;
+      inThisEmail.push({ kind, fields });
+      added += 1;
+
+      // In a split, «no address» is judged for each visit on its own.
+      const own = split ? item.doubts.filter((doubt) => doubt !== "لا يوجد عنوان") : item.doubts;
+      const reasons = [...holds, ...own, ...doubts];
+      // What to visit decides the form and the price, so a guess is always confirmed by a person.
+      if (!stated && kind) reasons.push("النوع مستنتج من العناوين: تأكد منه");
+      if (split && !profile.two_visits) reasons.push("زيارتان بسعرين: تأكد أنهما مطلوبتان");
+      if (twin.length) reasons.push("الشخص مكرر في نفس البريد");
+      if (earlier.some(repeats)) reasons.push("طلب مكرر محتمل: وصل لنفس الشخص خلال 30 يومًا");
+      if (byHand.some((other) => samePerson({ subject_name: fields.subject_name }, other))) {
+        reasons.push("مسجّل يدويًا لنفس الجهة خلال 30 يومًا");
+      }
+      if (!fromTable && !(item.confidence >= AUTO_CONFIDENCE)) reasons.push("القراءة غير مؤكدة");
+      if (!fields.subject_name) reasons.push("لا يوجد اسم");
+      else if (kind !== "business" && fields.subject_name.trim().split(/\s+/).length < 2) reasons.push("الاسم غير كامل");
+      if (!fields.address) reasons.push(split && kind === "work" ? "لا يوجد عنوان عمل" : "لا يوجد عنوان");
+      else if (fields.address.length < 8) reasons.push("العنوان غير كافٍ");
+      if (fields.national_id && !isNationalId(fields.national_id)) reasons.push("الرقم القومي غير صحيح");
+      if (!fields.governorate) reasons.push("المحافظة غير معروفة");
+      if (!kind) reasons.push("نوع الاستعلام غير محدد");
+      else if (!profile.templates[kind]) reasons.push(`لا يوجد نموذج «${KIND_LABELS[kind]}» لهذه الجهة`);
+
+      const unique = [...new Set(reasons.map(cleanText))];
+      const status = unique.length ? "review" : "ready";
+      await query(
+        `INSERT INTO mail_cases(message_id, client_id, kind, fast, fields, confidence, doubts, source, status, reason, release_at)
+         VALUES($1,$2,$3,$4,$5::text::jsonb,$6,$7,$8,$9,$10,$11)`,
+        [
+          message.message_id,
+          profile.client_id,
+          kind,
+          item.fast || emailFast,
+          JSON.stringify(fields),
+          Math.max(0, Math.min(1, Number(item.confidence) || 0)),
+          item.doubts.map(cleanText),
+          cleanText(item.source),
+          status,
+          unique.join("، ") || null,
+          releaseAt,
+        ],
+      );
+      if (status === "ready") ready += 1;
+    }
   }
   const waiting = added - ready;
   return {
@@ -337,50 +355,72 @@ function freshBodyHtml(html: string): string {
   return cut > 0 ? html.slice(0, cut) : html;
 }
 
-/** The fields an investigation needs, with the place snapped to the place list. */
-async function placed(item: ExtractedCase, kind: CaseKind | null) {
-  const visitAddress =
-    kind === "work" || kind === "business" ? (item.work_address ?? item.home_address) : (item.home_address ?? item.work_address);
-  let governorate = item.governorate;
-  let district = item.district;
-  if ((!governorate || !district) && visitAddress) {
-    const found = await placeOfAddress(`${visitAddress} ${governorate ?? ""} ${district ?? ""}`);
-    governorate ??= found.governorate;
-    district ??= found.district;
+type CaseFields = Awaited<ReturnType<typeof placed>>["fields"];
+
+/** The fields an investigation needs, with the place taken from the address being visited. */
+async function placed(item: ExtractedCase, kind: CaseKind | null, split: boolean) {
+  const atWork = kind === "work" || kind === "business";
+  // A single «Address» column is the place to visit, whatever the kind; in a split each visit
+  // has only its own address (an investigator is never sent home to ask about a job).
+  const visit = split
+    ? atWork
+      ? item.work_address
+      : item.home_address
+    : atWork
+      ? (item.work_address ?? item.home_address)
+      : (item.home_address ?? item.work_address);
+
+  const { index, governorates } = await placeIndex();
+  const found = findPlace(visit ?? "", index);
+  const doubts: string[] = [];
+  let governorate: string | null = null;
+  let district: string | null = null;
+  if (item.governorate) {
+    const snapped = await canonicalNames({ governorate: item.governorate } as never, { strictGovernorate: false });
+    governorate = governorates.has(snapped.governorate as string)
+      ? (snapped.governorate as string)
+      : findPlace(item.governorate, index).governorate;
+  }
+  if (found.conflict) doubts.push("العنوان يذكر أكثر من محافظة: تأكد منها");
+  // The client's column describes the home; a work visit in a split follows its own address.
+  if (split && atWork && found.governorate) governorate = found.governorate;
+  else if (!governorate) governorate = found.governorate;
+  else if (found.governorate && found.governorate !== governorate) {
+    doubts.push(`المحافظة المكتوبة (${governorate}) تختلف عن العنوان (${found.governorate})`);
+    if (found.stated) governorate = found.governorate;
   }
   if (governorate) {
-    const snapped = await canonicalNames({ governorate, district: district ?? null } as never, { strictGovernorate: false });
-    const known = (await placeIndex()).governorates.some((g) => g.name === snapped.governorate);
-    governorate = known ? (snapped.governorate ?? null) : null;
-    district = known ? (snapped.district ?? district) : district;
+    const typed = split && atWork ? null : item.district;
+    const snapped = typed ? await canonicalNames({ governorate, district: typed } as never, { strictGovernorate: false }) : null;
+    district = snapped?.district ?? (found.governorate === governorate ? found.district : null);
   }
+
   const extra: string[] = [];
   if (kind === "home_work" && item.home_address && item.work_address) extra.push(`عنوان العمل: ${item.work_address}`);
   if (item.company) extra.push(`جهة العمل: ${item.company}`);
-  return {
-    subject_name: item.subject_name?.trim() || null,
-    national_id: item.national_id ? (findNationalId(item.national_id) ?? item.national_id) : null,
-    phone: item.phone ? (normalizeMobile(item.phone) ?? item.phone) : null,
-    address: visitAddress?.trim() || null,
-    home_address: item.home_address,
-    work_address: item.work_address,
-    company: item.company,
+  const text = (value: string | null | undefined) => (value ? cleanText(value).trim() || null : null);
+  const fields = {
+    subject_name: text(item.subject_name),
+    national_id: text(item.national_id ? (findNationalId(item.national_id) ?? item.national_id) : null),
+    phone: text(item.phone ? (normalizeMobile(item.phone) ?? item.phone) : null),
+    address: text(visit),
+    home_address: text(item.home_address),
+    work_address: text(item.work_address),
+    company: text(item.company),
     governorate,
-    district,
-    client_reference: item.client_reference,
-    notes: [item.notes, ...extra].filter(Boolean).join("\n") || null,
+    district: text(district),
+    client_reference: text(item.client_reference),
+    notes: text([item.notes, ...extra].filter(Boolean).join("\n")),
   };
+  return { fields, doubts };
 }
 
-/** The sender and CC addresses at the client, for the reply screen's address list. */
+/** The sender and colleagues at the client, for the reply screen's address list. */
 async function learnContacts(clientId: string, message: Row): Promise<void> {
   const domain = (message.from_domain as string | null) ?? "";
   const all = [message.from_address as string | null, ...((message.cc_addresses as string[]) ?? []), ...((message.to_addresses as string[]) ?? [])]
-    .filter((a): a is string => Boolean(a))
-    .filter((a) => {
-      const d = a.split("@")[1] ?? "";
-      return d && (d === domain || d.endsWith(`.${domain}`) || domain.endsWith(`.${d}`));
-    });
+    .filter((address): address is string => Boolean(address))
+    .filter((address) => domainMatches(address.split("@")[1] ?? "", [domain]));
   for (const address of new Set(all)) {
     await query(
       `INSERT INTO mail_client_contacts(client_id, address, name) VALUES($1,$2,$3)

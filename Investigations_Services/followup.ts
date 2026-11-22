@@ -70,6 +70,14 @@ export function registerFollowUpRoutes(router: Router): void {
          FROM mail_cases x JOIN mail_messages m ON m.message_id = x.message_id LEFT JOIN form_clients c ON c.client_id = x.client_id
          WHERE x.status IN ('review','failed','ready') ORDER BY m.received_at LIMIT 300`,
       );
+      const unread = await query(
+        `SELECT m.message_id AS case_id, m.status, m.reason, m.subject AS subject_name, NULL AS governorate, NULL AS district,
+           NULL AS release_at, c.name AS client_name, m.received_at, m.subject
+         FROM mail_messages m LEFT JOIN form_clients c ON c.client_id = m.client_id
+         WHERE m.status IN ('review','failed') AND NOT EXISTS (SELECT 1 FROM mail_cases n WHERE n.message_id = m.message_id)
+         ORDER BY m.received_at LIMIT 300`,
+      );
+      mail.push(...unread);
       return ok({
         cases,
         mail_cases: mail,

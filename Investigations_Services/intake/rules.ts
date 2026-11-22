@@ -228,3 +228,70 @@ export function requestKind(subject: string, body: string): CaseKind | null {
   const own = freshBody(body);
   return detectKind(own) ?? detectKind(`${subject}\n${isForward(subject) ? body : own}`);
 }
+
+/** A request older than this was probably booked by hand already: it waits for a person. */
+export const STALE_HOURS = 20;
+
+/**
+ * When a case that is ready (or approved) at `now` goes out. It follows the time of arrival;
+ * one that only became ready later never wakes investigators at night because it arrived
+ * in the day. A few minutes between arrival and reading do not move it to the next morning.
+ */
+export function sendTime(receivedAt: Date, now: Date): Date {
+  const byArrival = releaseTime(receivedAt);
+  if (byArrival.at.getTime() > now.getTime()) return byArrival.at;
+  if (!byArrival.scheduled && now.getTime() - receivedAt.getTime() <= 30 * 60_000) return now;
+  return releaseTime(now).at;
+}
+
+/** Text PostgreSQL accepts: no NUL, no half of an emoji left by cutting a string. */
+export function cleanText(value: string): string {
+  return value.replace(/\u0000/g, "").toWellFormed();
+}
+
+/**
+ * The kind a table row itself implies when neither a type column nor the email says: an
+ * address for each visit means both, unless the row says there is no work visit.
+ */
+export function kindOfRow(row: {
+  home_address: string | null;
+  work_address: string | null;
+  company?: string | null;
+  notes?: string | null;
+}): CaseKind | null {
+  const said = normalizeText([row.company, row.work_address, row.notes].filter(Boolean).join(" "));
+  if (row.home_address && /بدون (استعلام )?(ال)?عمل|سكن فقط/.test(said)) return "home";
+  if (row.home_address && row.work_address) return "home_work";
+  if (row.home_address) return "home";
+  if (row.work_address) return "work";
+  return null;
+}
+
+/**
+ * «سكن وعمل» is two visits with two reports when the client has no single form for both
+ * (each bank form is one visit), so it becomes one case for each.
+ */
+export function visitsFor(kind: CaseKind | null, templates: Partial<Record<CaseKind, string>>): (CaseKind | null)[] {
+  if (kind === "home_work" && !templates.home_work && templates.home && templates.work) return ["home", "work"];
+  return [kind];
+}
+
+/** A subject about cases already sent (reminder, correction, cancellation, samples). */
+export function aboutEarlierCases(subject: string): boolean {
+  const s = normalizeText(subject).replace(/^((fw|fwd)\s*:\s*)+/, "");
+  return (
+    /reminder|pending|follow[ -]?up|cancel|تذكير|متابعه|الغاء|لتعديل|تعديل (اسم|عنوان|بيانات)|اعاده (ال)?استعلام|عينات|لم يستدل|توضيح/.test(s) ||
+    /^استعجال/.test(s)
+  );
+}
+
+/** What a file really is, from its first bytes (the declared type is often wrong). */
+export function sniffType(bytes: Uint8Array): "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "application/pdf" | null {
+  const head = String.fromCharCode(...bytes.subarray(0, 12));
+  if (head.startsWith("\u0089PNG")) return "image/png";
+  if (head.startsWith("\u00ff\u00d8\u00ff")) return "image/jpeg";
+  if (head.startsWith("GIF8")) return "image/gif";
+  if (head.startsWith("RIFF") && head.slice(8) === "WEBP") return "image/webp";
+  if (head.startsWith("%PDF")) return "application/pdf";
+  return null;
+}
