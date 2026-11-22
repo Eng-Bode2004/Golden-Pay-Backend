@@ -178,6 +178,7 @@ export function registerAdminSecurityRoutes(router: Router) {
       email,
       fullName,
       mfaRequired: body.mfa_required === true,
+      sendEmail: body.send_email !== false,
       actorId: auth.user.user_id,
       context,
     }));
@@ -186,7 +187,9 @@ export function registerAdminSecurityRoutes(router: Router) {
   router.post("/admin/administrators/invitations/:id/resend", withAuth(async (context, auth) => {
     await requireOwner(auth.user.user_id);
     consumeRateLimit(`admin.invite.resend:${auth.user.user_id}`, RATE_LIMITS.adminWrite);
-    return ok(await resendInvitation(context.params.id!, auth.user.user_id, context));
+    // A bare POST (no body) resends by email.
+    const body = context.req.headers.get("content-type")?.includes("application/json") ? await readJson(context.req) : {};
+    return ok(await resendInvitation(context.params.id!, auth.user.user_id, context, body.send_email !== false));
   }));
 
   router.delete("/admin/administrators/invitations/:id", withAuth(async (context, auth) => {

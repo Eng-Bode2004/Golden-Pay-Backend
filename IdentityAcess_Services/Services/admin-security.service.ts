@@ -240,6 +240,8 @@ export async function createInvitation(input: {
   email: string;
   fullName: string;
   mfaRequired: boolean;
+  /** False: only the link is made, for the owner to hand over; no email goes out. */
+  sendEmail: boolean;
   actorId: string;
   context: RequestContext;
 }): Promise<{ invitation_id: string; email: string; invite_url: string; email_sent: boolean; from: string }> {
@@ -257,7 +259,7 @@ export async function createInvitation(input: {
   );
   const url = inviteUrl(token);
   const template = adminInviteEmail({ fullName: input.fullName, inviteUrl: url, mfaRequired: input.mfaRequired });
-  const emailSent = await sendMail({ to: input.email, ...template });
+  const emailSent = input.sendEmail && (await sendMail({ to: input.email, ...template }));
   await recordAudit({
     event: "admin.invited",
     actorId: input.actorId,
@@ -274,7 +276,8 @@ export async function createInvitation(input: {
   };
 }
 
-export async function resendInvitation(invitationId: string, actorId: string, context: RequestContext) {
+/** A new link for the same invitation (the old one stops working), emailed unless sendEmail is false. */
+export async function resendInvitation(invitationId: string, actorId: string, context: RequestContext, sendEmail: boolean) {
   const invite = (await query("SELECT * FROM admin_invitations WHERE invitation_id=$1", [invitationId]))[0];
   if (!invite || invite.status !== "pending") throw ApiError.notFound("Invitation not found");
   if (new Date(String(invite.expires_at)).getTime() <= Date.now()) {
@@ -291,7 +294,7 @@ export async function resendInvitation(invitationId: string, actorId: string, co
     inviteUrl: url,
     mfaRequired: Boolean(invite.mfa_required),
   });
-  const emailSent = await sendMail({ to: String(invite.email), ...template });
+  const emailSent = sendEmail && (await sendMail({ to: String(invite.email), ...template }));
   await recordAudit({
     event: "admin.invite.resent",
     actorId,
