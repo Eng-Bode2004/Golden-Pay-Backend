@@ -43,6 +43,7 @@ import {
 import { EXCLUSION_LABELS, imbalance } from "./fairness.ts";
 import { notify } from "../Shared/notifications.ts";
 import { seesMoney, withoutMoney } from "./money-visibility.ts";
+import { answersFor, answersForReport, withoutPhone } from "./phone-visibility.ts";
 import { canonicalNames } from "../Shared/places.ts";
 import { firstPhotosKey, NEGATIVE_PHOTOS_KEY, negativeAnswers, negativeSummary } from "./negative.ts";
 import { LOCATION_KINDS, NEGATIVE_REASONS } from "./outcome.ts";
@@ -185,6 +186,8 @@ async function buildReport(id: string): Promise<void> {
       evidenceFor(row),
     ]);
     const definition = definitionOf(row.form_snapshot);
+    // Investigators do not get the customer's number, so the report takes it from the case.
+    const answers = answersForReport(definition, row);
     const approved = row.status === "approved";
     const [version] = row.template_version_id
       ? await query("SELECT layout_mode, layout_path, bindings, slots FROM template_versions WHERE version_id=$1", [row.template_version_id])
@@ -215,7 +218,7 @@ async function buildReport(id: string): Promise<void> {
           slots: (version.slots as { anchor: string; kind: string }[] | null) ?? null,
           definition,
           // Negative: the same client form, «لم يتم التعرف عليه» and whom we asked.
-          answers: negative ? negativeAnswers(definition, row) : (row.answers as Record<string, unknown>),
+          answers: negative ? negativeAnswers(definition, { ...row, answers }) : answers,
           context: {
             reference: row.reference as string,
             subject_name: row.subject_name as string,
@@ -269,7 +272,7 @@ async function buildReport(id: string): Promise<void> {
         submit_lat: row.submit_lat as number | null,
         submit_lng: row.submit_lng as number | null,
         definition,
-        answers: row.answers as Record<string, unknown>,
+        answers,
         images: images as never,
         outcome: row.outcome as string,
         negative_reasons: (row.negative_reasons as string[] | null) ?? [],
@@ -499,26 +502,26 @@ async function listMine(_context: RequestContext, auth: AuthContext): Promise<Re
   const me = auth.user.user_id;
   const [available, active, done] = await Promise.all([
     query(
-      `SELECT ${LIST_COLUMNS}, o.expires_at AS offer_expires_at FROM investigations i
+      `SELECT ${LIST_COLUMNS}, i.subject_phone, i.source, o.expires_at AS offer_expires_at FROM investigations i
        JOIN investigation_offers o ON o.investigation_id = i.investigation_id AND o.user_id = $1 AND o.response IS NULL
        LEFT JOIN users u ON u.user_id = i.assignee_id
        WHERE i.status = 'open' ORDER BY o.expires_at`,
       [me],
     ),
     query(
-      `SELECT ${LIST_COLUMNS} FROM investigations i LEFT JOIN users u ON u.user_id = i.assignee_id
+      `SELECT ${LIST_COLUMNS}, i.subject_phone, i.source FROM investigations i LEFT JOIN users u ON u.user_id = i.assignee_id
        WHERE i.assignee_id = $1 AND i.status IN ('assigned','in_progress','returned')
        ORDER BY i.status = 'returned' DESC, i.created_at DESC`,
       [me],
     ),
     query(
-      `SELECT ${LIST_COLUMNS} FROM investigations i LEFT JOIN users u ON u.user_id = i.assignee_id
+      `SELECT ${LIST_COLUMNS}, i.subject_phone, i.source FROM investigations i LEFT JOIN users u ON u.user_id = i.assignee_id
        WHERE i.assignee_id = $1 AND i.status IN ('submitted','approved')
        ORDER BY i.submitted_at DESC LIMIT 50`,
       [me],
     ),
   ]);
-  return ok({ available, active, done });
+  return ok({ available: available.map(withoutPhone), active: active.map(withoutPhone), done: done.map(withoutPhone) });
 }
 
 const answersOf = (body: Row): string => {
@@ -658,7 +661,11 @@ router.get(
     );
     // Administrators review cases without the money; the investigator sees their own pay.
     const hideMoney = manager && row.assignee_id !== auth.user.user_id && !seesMoney(auth);
-    const detail = withImages(row, await imagesOf(row.investigation_id), manager);
+    // The customer's number is the administrators': investigators get the case without it.
+    const visible = manager
+      ? row
+      : { ...withoutPhone(row), answers: answersFor(definitionOf(row.form_snapshot), row, auth.user.user_id) };
+    const detail = withImages(visible, await imagesOf(row.investigation_id), manager);
     return ok({
       investigation: {
         ...(hideMoney ? withoutMoney(detail) : detail),

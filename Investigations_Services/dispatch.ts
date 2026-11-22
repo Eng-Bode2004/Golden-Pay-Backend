@@ -13,6 +13,7 @@ import {
   selectNext,
   selectSequential,
 } from "./fairness.ts";
+import { withoutPhone } from "./phone-visibility.ts";
 
 /**
  * Fairness-aware broadcast dispatch (docs/dispatch-fairness.md).
@@ -252,7 +253,7 @@ async function issueOffers(item: Row, userIds: string[], tier: number, minutes: 
   await notify(offered, {
     kind: "offer",
     title: "استعلام جديد متاح لك",
-    body: `${item.reference} · ${[item.district, item.governorate].filter(Boolean).join(" - ") || item.address}. أول من يقبل يأخذه.`,
+    body: `${item.reference} · ${[item.district, item.governorate].filter(Boolean).join(" - ") || withoutPhone(item).address}. أول من يقبل يأخذه.`,
     investigation_id: item.investigation_id as string,
   });
 }
@@ -740,7 +741,7 @@ export async function assignManually(
     await notify(userId, {
       kind: "assigned",
       title: "أُسند إليك استعلام",
-      body: `${item.reference} · ${item.subject_name}`,
+      body: `${item.reference} · ${withoutPhone(item).subject_name}`,
       investigation_id: investigationId,
     });
     if (previous) {
