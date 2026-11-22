@@ -61,8 +61,8 @@ export async function pollInbox(inbox: Inbox): Promise<number> {
     logger: false,
     socketTimeout: 120_000,
   });
-  // Without a listener a dropped or timed-out connection is an unhandled 'error' event, which
-  // ends the whole investigations service. The pending call rejects and pollAll records it.
+  // A dropped or timed-out connection emits 'error': log it with the inbox's name instead of
+  // leaving it to keepServiceAlive as an uncaught exception. The poll is retried either way.
   client.on("error", (error: Error) =>
     console.error(JSON.stringify({ level: "warn", message: "mail.connection_error", inbox: inbox.name, error: error.message })),
   );
