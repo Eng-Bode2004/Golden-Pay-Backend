@@ -472,6 +472,12 @@ export async function insertCase(
 async function listAll(context: RequestContext, auth: AuthContext): Promise<Response> {
   const status = context.url.searchParams.get("status");
   const search = context.url.searchParams.get("search")?.trim();
+  // The companies and banks this administrator reviews; none chosen means all.
+  const chosen = (context.url.searchParams.get("clients") ?? "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter((id) => id && id.length <= 64);
+  const clientIds = chosen.length ? [...new Set(chosen)].slice(0, 100) : null;
   const rows = await query(
     `SELECT ${LIST_COLUMNS}, i.client_price::float8 AS client_price, (SELECT count(*)::int FROM investigation_recipients r
         WHERE r.investigation_id = i.investigation_id) AS recipients,
@@ -487,12 +493,28 @@ async function listAll(context: RequestContext, auth: AuthContext): Promise<Resp
      ) o ON true
      WHERE ($1::text IS NULL OR i.status = $1)
        AND ($2::text IS NULL OR i.subject_name ILIKE '%'||$2||'%' OR i.reference ILIKE '%'||$2||'%')
+       AND ($3::text[] IS NULL OR i.client_id = ANY($3::text[]))
      ORDER BY i.created_at DESC LIMIT 200`,
-    [status || null, search || null],
+    [status || null, search || null, clientIds],
   );
-  const counts = await query("SELECT status, count(*)::int AS total FROM investigations GROUP BY status");
+  const [counts, clients] = await Promise.all([
+    query(
+      "SELECT status, count(*)::int AS total FROM investigations WHERE ($1::text[] IS NULL OR client_id = ANY($1::text[])) GROUP BY status",
+      [clientIds],
+    ),
+    // Every client to choose from, with the reports waiting for review at each.
+    query(
+      `SELECT c.client_id, c.name, c.client_type, count(i.investigation_id)::int AS total,
+         count(i.investigation_id) FILTER (WHERE i.status = 'submitted')::int AS to_review
+       FROM form_clients c LEFT JOIN investigations i ON i.client_id = c.client_id
+       GROUP BY c.client_id
+       HAVING c.active OR count(i.investigation_id) > 0
+       ORDER BY c.name`,
+    ),
+  ]);
   const listed = {
     investigations: rows,
+    clients,
     counts: Object.fromEntries(counts.map((row) => [row.status, row.total])),
   };
   return ok(seesMoney(auth) ? listed : withoutMoney(listed));
