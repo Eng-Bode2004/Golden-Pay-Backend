@@ -103,7 +103,9 @@ export const RATE_LIMITS = {
     max: 10,
     message: "Too many signup attempts, try again later",
   },
-  refresh: { windowMs: 15 * 60 * 1000, max: 120, message: "Too many refresh requests" },
+  // Every open tab and phone refreshes every 15 minutes, many from one office address. The
+  // token is 48 random bytes, so this limit only guards against floods.
+  refresh: { windowMs: 15 * 60 * 1000, max: 3000, message: "Too many refresh requests" },
   biometric: {
     windowMs: 15 * 60 * 1000,
     max: 30,

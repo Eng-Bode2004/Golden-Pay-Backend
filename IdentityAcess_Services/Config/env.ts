@@ -89,7 +89,6 @@ export interface AppEnv {
   readonly jwtIssuer: string;
   readonly jwtAudience: string;
   readonly accessTokenTtlSeconds: number;
-  readonly refreshTokenTtlSeconds: number;
   readonly signupTokenTtlSeconds: number;
   readonly nationalIdEncryptionKey: Buffer;
   readonly nationalIdHmacSecret: string;
@@ -140,7 +139,6 @@ export function loadEnv(): AppEnv {
     jwtIssuer: readString("JWT_ISSUER", "golden-pay-identity"),
     jwtAudience: readString("JWT_AUDIENCE", "golden-pay-clients"),
     accessTokenTtlSeconds: readNumber("ACCESS_TOKEN_TTL_SECONDS", 15 * 60, 60),
-    refreshTokenTtlSeconds: readNumber("REFRESH_TOKEN_TTL_SECONDS", 30 * 24 * 60 * 60, 300),
     signupTokenTtlSeconds: readNumber("SIGNUP_TOKEN_TTL_SECONDS", 20 * 60, 60),
     nationalIdEncryptionKey: readEncryptionKey(
       "NATIONAL_ID_ENCRYPTION_KEY",

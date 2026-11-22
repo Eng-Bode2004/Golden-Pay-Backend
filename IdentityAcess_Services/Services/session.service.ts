@@ -9,6 +9,14 @@ import { ApiError } from "../Utils/http.ts";
 import { signAccessToken } from "../Utils/jwt.ts";
 import { assertInvestigatorDevice } from "./device-lock.service.ts";
 
+/**
+ * Sessions do not expire: one ends only when somebody ends it (sign-out, password change,
+ * suspension, phone reset, security policy change). 100 years rather than NULL, because the
+ * column is NOT NULL and installed apps add this number of seconds to today's date.
+ */
+export const SESSION_LIFETIME_SECONDS = 100 * 365 * 24 * 60 * 60;
+const sessionEnd = (): Date => new Date(Date.now() + SESSION_LIFETIME_SECONDS * 1000);
+
 export interface DeviceMetadata {
   deviceId?: string | null;
   deviceName?: string | null;
@@ -40,7 +48,7 @@ export async function createSession(
   await assertInvestigatorDevice(user.user_id, metadata);
   const sessionId = newId();
   const refreshToken = randomToken(48);
-  const expiresAt = new Date(Date.now() + env.refreshTokenTtlSeconds * 1000);
+  const expiresAt = sessionEnd();
   const now = new Date();
 
   await RefreshSessionModel.create({
@@ -58,21 +66,31 @@ export async function createSession(
     expires_at: expiresAt,
   });
 
+  return tokenBundle(
+    { session_id: sessionId, user_id: user.user_id, auth_method: authMethod, created_at: now, expires_at: expiresAt },
+    refreshToken,
+  );
+}
+
+function tokenBundle(
+  session: Pick<RefreshSession, "session_id" | "user_id" | "auth_method" | "created_at" | "expires_at">,
+  refreshToken: string,
+): TokenBundle {
   return {
     access_token: signAccessToken({
-      user_id: user.user_id,
-      session_id: sessionId,
-      auth_method: authMethod,
+      user_id: session.user_id,
+      session_id: session.session_id,
+      auth_method: session.auth_method,
     }),
     refresh_token: refreshToken,
     token_type: "Bearer",
     expires_in: env.accessTokenTtlSeconds,
-    refresh_expires_in: env.refreshTokenTtlSeconds,
-    auth_method: authMethod,
+    refresh_expires_in: SESSION_LIFETIME_SECONDS,
+    auth_method: session.auth_method,
     session: {
-      session_id: sessionId,
-      created_at: now,
-      expires_at: expiresAt,
+      session_id: session.session_id,
+      created_at: session.created_at,
+      expires_at: session.expires_at,
     },
   };
 }
@@ -84,48 +102,35 @@ export async function findSessionByRefreshToken(
 }
 
 /**
- * Atomically consumes a session for rotation. Returns the previous session
- * document when this caller won the race, otherwise treats it as token reuse.
+ * A new access token for the same session. The refresh token is not replaced, so several tabs,
+ * a lost reply or a retry can use it again. The update matches live sessions only: a sign-out
+ * that happens meanwhile wins.
  */
-export async function claimSessionForRotation(
+export async function renewSession(
   session: RefreshSessionDocument,
-): Promise<RefreshSessionDocument> {
-  const claimed = await RefreshSessionModel.findOneAndUpdate(
+  refreshToken: string,
+  metadata: Pick<DeviceMetadata, "ip" | "userAgent">,
+): Promise<TokenBundle> {
+  // Investigators stay bound to their own phone.
+  await assertInvestigatorDevice(session.user_id, {
+    deviceId: session.device_id,
+    deviceName: session.device_name,
+    platform: session.platform,
+  });
+  const renewed = await RefreshSessionModel.findOneAndUpdate(
     { _id: session._id, revoked_at: null },
     {
       $set: {
-        revoked_at: new Date(),
-        revoked_reason: "rotated",
+        expires_at: sessionEnd(),
         last_used_at: new Date(),
+        ip: metadata.ip,
+        user_agent: metadata.userAgent,
       },
     },
     { new: true },
   );
-
-  if (!claimed) {
-    throw ApiError.unauthorized("Refresh token has already been used");
-  }
-
-  return claimed;
-}
-
-export async function linkRotatedSession(
-  previousSessionId: string,
-  replacementSessionId: string,
-): Promise<void> {
-  await RefreshSessionModel.updateOne(
-    { session_id: previousSessionId },
-    { $set: { replaced_by_session_id: replacementSessionId } },
-  );
-}
-
-export async function markSessionReused(session: RefreshSessionDocument): Promise<void> {
-  await revokeAllUserSessions(
-    session.user_id,
-    "refresh_token_reuse_detected",
-    undefined,
-    session._id.toString(),
-  );
+  if (!renewed) throw ApiError.unauthorized("Session has been revoked");
+  return tokenBundle(renewed, refreshToken);
 }
 
 export async function revokeSession(

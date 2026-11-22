@@ -182,6 +182,9 @@ CREATE INDEX IF NOT EXISTS idx_employee_records_user ON employee_records (user_i
 
 CREATE INDEX IF NOT EXISTS idx_refresh_sessions_user ON refresh_sessions (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_refresh_sessions_expires ON refresh_sessions (expires_at);
+-- Sessions do not expire. Live ones from before that rule are extended, ended ones stay ended.
+UPDATE refresh_sessions SET expires_at = now() + interval '100 years'
+  WHERE revoked_at IS NULL AND expires_at > now() AND expires_at < now() + interval '50 years';
 
 CREATE INDEX IF NOT EXISTS idx_biometric_user ON biometric_credentials (user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_biometric_active_device

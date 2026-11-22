@@ -37,10 +37,8 @@ import { generateEmployeeNumber } from "./employeeNumber.service.ts";
 import { recordAudit } from "./audit.service.ts";
 import {
   createSession,
-  claimSessionForRotation,
   findSessionByRefreshToken,
-  linkRotatedSession,
-  markSessionReused,
+  renewSession,
   revokeAllUserSessions,
   revokeSession,
   revokeSessionByUser,
@@ -90,8 +88,6 @@ export interface SignupCompleted {
   message: string;
 }
 
-/** How long a refresh token may be sent again after its reply was lost (see refreshTokens). */
-const REFRESH_RETRY_GRACE_MS = 60_000;
 const DUMMY_PASSWORD_HASH = await Bun.password.hash(
   "identity-service-timing-safety-dummy-password",
   { algorithm: "argon2id" },
@@ -788,46 +784,23 @@ export async function refreshTokens(
     throw ApiError.unauthorized("Invalid refresh token");
   }
 
-  let session = await findSessionByRefreshToken(refreshToken);
+  const session = await findSessionByRefreshToken(refreshToken);
   if (!session) {
     throw ApiError.unauthorized("Invalid refresh token");
   }
 
-  // The reply to a refresh can be lost (the connection dropped or the server restarted after
-  // rotating). The browser then sends the same token again moments later. Within a short
-  // window, and only while the session that replaced it is still unused, rotate that
-  // replacement instead of treating the retry as a stolen token.
-  if (
-    session.revoked_at &&
-    session.revoked_reason === "rotated" &&
-    session.replaced_by_session_id &&
-    Date.now() - session.revoked_at.getTime() < REFRESH_RETRY_GRACE_MS
-  ) {
-    const replacement = await RefreshSessionModel.findOne({ session_id: session.replaced_by_session_id });
-    if (replacement && !replacement.revoked_at && replacement.user_id === session.user_id) {
-      await recordAudit({
-        event: "auth.refresh.retry",
-        userId: session.user_id,
-        success: true,
-        reason: "lost_refresh_reply",
-        context,
-        metadata: { session_id: session.session_id, replacement_session_id: replacement.session_id },
-      });
-      session = replacement;
-    }
-  }
-
+  // An ended session refuses only its own token. It must never end the account's other
+  // sessions: several people can share one account, and an old tab would sign them all out.
   if (session.revoked_at) {
-    await markSessionReused(session);
     await recordAudit({
-      event: "auth.refresh.reuse_detected",
+      event: "auth.refresh.refused",
       userId: session.user_id,
       success: false,
-      reason: "refresh_token_reuse",
+      reason: session.revoked_reason ?? "revoked",
       context,
       metadata: { session_id: session.session_id },
     });
-    throw ApiError.unauthorized("Refresh token has already been used");
+    throw ApiError.unauthorized("Session has been revoked");
   }
 
   if (session.expires_at.getTime() <= Date.now()) {
@@ -845,31 +818,10 @@ export async function refreshTokens(
     assertAccountActive(user);
   }
 
-  let claimed;
-  try {
-    claimed = await claimSessionForRotation(session);
-  } catch (error) {
-    await markSessionReused(session);
-    await recordAudit({
-      event: "auth.refresh.reuse_detected",
-      userId: session.user_id,
-      success: false,
-      reason: "refresh_token_race_or_reuse",
-      context,
-      metadata: { session_id: session.session_id },
-    });
-    throw error;
-  }
-
-  const tokens = await createSession(user, session.auth_method, {
-    deviceId: claimed.device_id ?? null,
-    deviceName: claimed.device_name ?? null,
-    platform: (claimed.platform ?? "unknown") as DeviceMetadata["platform"],
+  const tokens = await renewSession(session, refreshToken, {
     ip: context.ip,
     userAgent: getUserAgent(context.req),
   });
-
-  await linkRotatedSession(session.session_id, tokens.session.session_id);
 
   const access = await loadAccess(user.user_id);
 
@@ -879,10 +831,7 @@ export async function refreshTokens(
     employeeNumber: user.employee_number ?? null,
     success: true,
     context,
-    metadata: {
-      previous_session_id: session.session_id,
-      session_id: tokens.session.session_id,
-    },
+    metadata: { session_id: session.session_id },
   });
 
   return {

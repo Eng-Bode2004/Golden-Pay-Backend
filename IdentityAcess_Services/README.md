@@ -53,7 +53,7 @@ repository `Storage/` tree, outside the service folder.
   employee number (`GP-000001`, ...) that the applicant must save
 - Admin/HR review: approve, reject, suspend, reactivate, assign roles, inspect
   national-ID images and audit logs
-- Session management with rotating refresh tokens, reuse detection and revocation
+- Sessions that last until they are ended, with revocation
 - Argon2id password hashing, encrypted national IDs, brute-force lockout, per-IP and
   per-account rate limits, UUID request IDs and audit logging
 
@@ -210,7 +210,6 @@ All settings are read by `Config/env.ts` from the environment or `.env`
 | `NATIONAL_ID_HMAC_SECRET` | dev fallback | Duplicate detection / HR matching |
 | `REFRESH_TOKEN_PEPPER` | dev fallback | Refresh-token and biometric-nonce hashing |
 | `ACCESS_TOKEN_TTL_SECONDS` | `900` | Access-token lifetime |
-| `REFRESH_TOKEN_TTL_SECONDS` | `2592000` | Refresh-token lifetime (30 days) |
 | `SIGNUP_TOKEN_TTL_SECONDS` | `1200` | Existing-employee signup window |
 | `BIOMETRIC_CHALLENGE_TTL_SECONDS` | `90` | Challenge lifetime |
 | `EMPLOYEE_NUMBER_PREFIX` | `GP` | Generated numbers look like `GP-000001` |
@@ -408,7 +407,7 @@ Response `200`:
     "refresh_token": "<opaque token>",
     "token_type": "Bearer",
     "expires_in": 900,
-    "refresh_expires_in": 2592000,
+    "refresh_expires_in": 3153600000,
     "auth_method": "password",
     "session": {
       "session_id": "…",
@@ -445,8 +444,9 @@ Notes:
 { "refresh_token": "<opaque token>" }
 ```
 
-Refresh tokens are single-use and rotate on every call. Reusing an already-rotated
-token revokes **all** sessions for that user and returns `401`.
+Returns a new access token and the same refresh token: a session lasts until it is ended
+(sign-out, password change, suspension, phone reset, security policy change). The token of an
+ended session returns `401` and does not affect the account's other sessions.
 
 #### `POST /auth/logout`
 
@@ -915,7 +915,7 @@ investigators with generated credentials, employee directory and the audit log. 
 | `404` on existing-employee start | Employee number not in the HR registry — import it first |
 | `409 EMPLOYEE_ALREADY_REGISTERED` | A user or claimed registry record already exists |
 | `400 IDENTITY_VERIFICATION_FAILED` | Name/phone/national ID differ from HR data; set `STRICT_EMPLOYEE_VERIFICATION=false` only if intended |
-| `401` after refresh | Token was already rotated (reuse detection) — sign in again |
+| `401` after refresh | That session was ended — sign in again |
 | `403 ACCOUNT_NOT_ACTIVE` | Account is pending, rejected or suspended — needs admin action |
 | `429` on login | Per-IP limit or account lockout; wait for `Retry-After` |
 | `413` on signup | ID images exceed `MAX_UPLOAD_BYTES` |
