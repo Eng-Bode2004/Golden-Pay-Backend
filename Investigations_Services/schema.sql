@@ -303,3 +303,125 @@ CREATE INDEX IF NOT EXISTS idx_price_rules_lookup ON price_rules (service_level,
 
 -- Which price list a case was priced from (for the audit trail).
 ALTER TABLE investigations ADD COLUMN IF NOT EXISTS price_rule_id text;
+
+-- ── Email intake ───────────────────────────────────────────────────────────────────────────
+-- Case emails from banks and companies become investigations automatically; anything the
+-- system cannot read with confidence waits for an administrator with the reason.
+
+-- How each client sends cases: its email domains, which form each kind of case uses, and
+-- how it marks a fast case. The sender's domain says which client an email is from.
+CREATE TABLE IF NOT EXISTS mail_client_profiles (
+  client_id text PRIMARY KEY,
+  domains text[] NOT NULL DEFAULT '{}',
+  -- kind (home | work | home_work | business | finishing) → template_id
+  templates jsonb NOT NULL DEFAULT '{}',
+  fast_words text[] NOT NULL DEFAULT '{}',
+  normal_level text NOT NULL DEFAULT 'normal',
+  fast_level text NOT NULL DEFAULT 'urgent',
+  -- Automatic: cases read with confidence go straight to dispatch; otherwise every case waits.
+  auto_send boolean NOT NULL DEFAULT true,
+  -- Words that mean "not a case" for this client (thanks, reminders, …).
+  ignore_words text[] NOT NULL DEFAULT '{}',
+  notes text,
+  active boolean NOT NULL DEFAULT true,
+  updated_by text,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Where each inbox got to (IMAP UIDs only grow within one UIDVALIDITY).
+CREATE TABLE IF NOT EXISTS mail_inbox_state (
+  inbox text PRIMARY KEY,
+  uid_validity text,
+  last_uid bigint NOT NULL DEFAULT 0,
+  last_poll_at timestamptz,
+  last_ok_at timestamptz,
+  last_error text
+);
+
+-- Every email received, with what the system did with it.
+CREATE TABLE IF NOT EXISTS mail_messages (
+  message_id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  inbox text NOT NULL,
+  uid bigint NOT NULL,
+  header_message_id text,
+  from_address text,
+  from_name text,
+  from_domain text,
+  to_addresses text[] NOT NULL DEFAULT '{}',
+  cc_addresses text[] NOT NULL DEFAULT '{}',
+  subject text NOT NULL DEFAULT '',
+  body_text text,
+  received_at timestamptz NOT NULL,
+  client_id text,
+  raw_path text,
+  -- [{index, name, type, bytes, path}]
+  attachments jsonb NOT NULL DEFAULT '[]',
+  -- new | processing | cases | review | reply | ignored | unknown_sender | failed
+  status text NOT NULL DEFAULT 'new',
+  reason text,
+  ai_used boolean NOT NULL DEFAULT false,
+  processed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_mail_message ON mail_messages (inbox, uid, COALESCE(header_message_id, ''));
+CREATE INDEX IF NOT EXISTS idx_mail_messages_status ON mail_messages (status, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mail_messages_client ON mail_messages (client_id, received_at DESC);
+
+-- One person to investigate, read from an email (an Excel row, a body form, a scanned page).
+CREATE TABLE IF NOT EXISTS mail_cases (
+  case_id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  message_id text NOT NULL REFERENCES mail_messages(message_id) ON DELETE CASCADE,
+  client_id text,
+  -- home | work | home_work | business | finishing
+  kind text,
+  fast boolean NOT NULL DEFAULT false,
+  fields jsonb NOT NULL DEFAULT '{}',
+  confidence numeric(4,3),
+  -- What the reader was not sure of, in Arabic, for the reviewer.
+  doubts text[] NOT NULL DEFAULT '{}',
+  source text,
+  -- review | ready | sent | failed | rejected
+  status text NOT NULL DEFAULT 'review',
+  reason text,
+  release_at timestamptz,
+  investigation_id text,
+  reviewed_by text,
+  reviewed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_mail_cases_status ON mail_cases (status, release_at);
+CREATE INDEX IF NOT EXISTS idx_mail_cases_message ON mail_cases (message_id);
+
+-- The case an email produced, for the reply that carries its report back.
+ALTER TABLE investigations ADD COLUMN IF NOT EXISTS mail_case_id text;
+ALTER TABLE investigations ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'manual';
+
+-- Addresses at each client, learned from the emails they send (sender and CC).
+CREATE TABLE IF NOT EXISTS mail_client_contacts (
+  client_id text NOT NULL,
+  address text NOT NULL,
+  name text,
+  seen_count integer NOT NULL DEFAULT 1,
+  last_seen_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (client_id, address)
+);
+
+-- Reports emailed back to clients.
+CREATE TABLE IF NOT EXISTS mail_sent (
+  sent_id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  investigation_id text REFERENCES investigations(investigation_id) ON DELETE SET NULL,
+  inbox text NOT NULL,
+  to_addresses text[] NOT NULL,
+  cc_addresses text[] NOT NULL DEFAULT '{}',
+  subject text NOT NULL,
+  body text NOT NULL,
+  attachments jsonb NOT NULL DEFAULT '[]',
+  in_reply_to text,
+  smtp_message_id text,
+  status text NOT NULL DEFAULT 'sent',
+  error text,
+  sent_by text,
+  sent_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_mail_sent_case ON mail_sent (investigation_id, sent_at DESC);

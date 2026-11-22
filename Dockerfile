@@ -27,8 +27,10 @@ ENV NODE_ENV=production \
 WORKDIR /app
 COPY Shared/package.json Shared/bun.lock Shared/
 COPY IdentityAcess_Services/package.json IdentityAcess_Services/bun.lock IdentityAcess_Services/
+COPY Investigations_Services/package.json Investigations_Services/bun.lock Investigations_Services/
 RUN cd Shared && bun install --frozen-lockfile --production \
-  && cd ../IdentityAcess_Services && bun install --frozen-lockfile --production
+  && cd ../IdentityAcess_Services && bun install --frozen-lockfile --production \
+  && cd ../Investigations_Services && bun install --frozen-lockfile --production
 
 COPY . .
 # Stand-ins for the Windows fonts client forms name, so their labels keep their width.

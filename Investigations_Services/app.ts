@@ -18,6 +18,9 @@ import { Router } from "../IdentityAcess_Services/Utils/router.ts";
 import { optionalNumber, optionalText, requiredText, startService } from "../Shared/service.ts";
 import { findServiceLevel, registerFinanceRoutes, seedServiceLevels } from "./finance.ts";
 import { quotePrice, registerPricingRoutes } from "./pricing.ts";
+import { registerFollowUpRoutes } from "./followup.ts";
+import { registerIntakeRoutes, startIntake, type IntakeDeps } from "./intake/index.ts";
+import { matchInvestigators } from "../Investigators_Services/app.ts";
 import {
   acceptOffer,
   assignManually,
@@ -303,6 +306,52 @@ async function createInvestigation(context: RequestContext, auth: AuthContext): 
     `/forms/templates/${encodeURIComponent(templateId)}`,
     context,
   );
+  const result = await insertCase(body, template, auth.user.user_id, async (filter) => {
+    const { investigators } = await sibling<{ investigators: { user_id: string }[] }>(
+      INVESTIGATORS_URL,
+      "/investigators/match",
+      context,
+      { method: "POST", body: JSON.stringify(filter) },
+    );
+    return investigators.map((person) => person.user_id);
+  });
+  await recordAudit({
+    event: "investigation.created",
+    actorId: auth.user.user_id,
+    success: true,
+    context,
+    metadata: { reference: result.reference, target_mode: mode, recipients: result.recipients, template_version: template.version_no },
+  });
+  return created(result);
+}
+
+/** The active approved version of a form, read directly (the email intake has no user token). */
+export async function activeTemplate(templateId: string): Promise<Row> {
+  const [row] = await query(
+    `SELECT t.template_id, t.title, t.client_id, t.investigation_type, t.active, c.name AS client_name,
+            v.version_id, v.version_no, v.definition, v.content_hash
+     FROM form_templates t JOIN form_clients c ON c.client_id = t.client_id
+     LEFT JOIN template_versions v ON v.version_id = t.active_version_id AND v.status = 'active'
+     WHERE t.template_id = $1`,
+    [templateId],
+  );
+  if (!row) throw new ApiError(404, "NOT_FOUND", "Form not found");
+  return row;
+}
+
+/**
+ * Creates one investigation from validated input and offers it. Shared by the admin's
+ * "send a case" screen and the email intake. `match` finds the area's investigators.
+ */
+export async function insertCase(
+  body: Row,
+  template: Row,
+  actorId: string,
+  match: (filter: Row) => Promise<string[]>,
+  extra: { source?: string; mailCaseId?: string | null } = {},
+): Promise<{ investigation_id: string; reference: string; recipients: number }> {
+  const mode = body.target_mode;
+  if (mode !== "person" && mode !== "area") throw ApiError.badRequest("target_mode must be person or area");
   if (!template.version_id || template.active === false) {
     throw new ApiError(409, "TEMPLATE_NOT_ACTIVE", "This form is not active for new investigations");
   }
@@ -319,13 +368,7 @@ async function createInvestigation(context: RequestContext, auth: AuthContext): 
     recipients = [assignee];
   } else {
     area = body.area;
-    const { investigators } = await sibling<{ investigators: { user_id: string }[] }>(
-      INVESTIGATORS_URL,
-      "/investigators/match",
-      context,
-      { method: "POST", body: JSON.stringify({ ...((area as Row | null) ?? {}), client_id: template.client_id ?? null }) },
-    );
-    recipients = investigators.map((person) => person.user_id);
+    recipients = await match({ ...((area as Row | null) ?? {}), client_id: template.client_id ?? null });
     if (!recipients.length) {
       throw new ApiError(
         409,
@@ -390,7 +433,7 @@ async function createInvestigation(context: RequestContext, auth: AuthContext): 
         template.template_id,
         template.title,
         JSON.stringify(template.definition),
-        auth.user.user_id,
+        actorId,
         null,
         level.code,
         level.name_ar,
@@ -411,18 +454,16 @@ async function createInvestigation(context: RequestContext, auth: AuthContext): 
         await query("INSERT INTO investigation_recipients(investigation_id,user_id) VALUES($1,$2)", [id, user]);
       }
     }
-    await query("UPDATE investigations SET price_rule_id = $2 WHERE investigation_id = $1", [id, quote.rule_id]);
-    await logEvent(id, "created", null, auth.user.user_id);
+    await query("UPDATE investigations SET price_rule_id = $2, source = $3, mail_case_id = $4 WHERE investigation_id = $1", [
+      id,
+      quote.rule_id,
+      extra.source ?? "manual",
+      extra.mailCaseId ?? null,
+    ]);
+    await logEvent(id, "created", null, actorId);
   });
   await offerNext(id);
-  await recordAudit({
-    event: "investigation.created",
-    actorId: auth.user.user_id,
-    success: true,
-    context,
-    metadata: { reference, target_mode: mode, recipients: recipients.length, template_version: template.version_no },
-  });
-  return created({ investigation_id: id, reference, recipients: recipients.length });
+  return { investigation_id: id, reference, recipients: recipients.length };
 }
 
 async function listAll(context: RequestContext, auth: AuthContext): Promise<Response> {
@@ -492,6 +533,10 @@ const router = new Router();
 router.get("/investigations/mine", withAuth(listMine));
 registerFinanceRoutes(router);
 registerPricingRoutes(router);
+registerFollowUpRoutes(router);
+// Case emails from clients; the same case creation as the admin's screen.
+const intakeDeps: IntakeDeps = { activeTemplate, insertCase, matchInvestigators };
+registerIntakeRoutes(router, intakeDeps);
 router.get("/investigations", withPermission(MANAGE, listAll));
 router.post("/investigations", withPermission(MANAGE, createInvestigation));
 
@@ -1221,3 +1266,4 @@ await startService({
   seed: seedServiceLevels,
 });
 startDispatcher();
+startIntake(intakeDeps);

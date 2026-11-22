@@ -14,6 +14,6 @@
     "types": ["bun"],
     "typeRoots": ["./IdentityAcess_Services/node_modules/@types", "./IdentityAcess_Services/node_modules"]
   },
-  "include": ["start.ts", "Shared/**/*.ts", "DynamicForms_Services/*.ts", "Investigations_Services/*.ts"],
+  "include": ["start.ts", "Shared/**/*.ts", "DynamicForms_Services/*.ts", "Investigations_Services/*.ts", "Investigations_Services/intake/*.ts"],
   "exclude": ["**/node_modules/**"]
 }

@@ -1533,6 +1533,61 @@ export function registerTemplateRoutes(router: Router): void {
     }),
   );
 
+  /**
+   * A new form that starts as a copy of this version (same client, layout and questions),
+   * e.g. a client's «تشطيب وحدة» form from its «سكن» form. The copy is a draft: its title line is edited,
+   * then it is reviewed and approved like any other version.
+   */
+  router.post(
+    "/forms/admin/versions/:version_id/copy-to-new",
+    withPermission(MANAGE, async (context, auth) => {
+      const version = await findVersion(context.params.version_id);
+      const body = await readJson(context.req);
+      const title = requiredText(body.title, "title", 200);
+      const [source] = await query("SELECT * FROM form_templates WHERE template_id = $1", [version.template_id]);
+      if (!source) throw ApiError.notFound("Template not found");
+      const result = await transaction(async () => {
+        const [family] = await query(
+          `INSERT INTO form_templates(code,client_id,title,category,sections,source_file,active,investigation_type,updated_by)
+           VALUES($1,$2,$3,$4,'[]'::jsonb,$5,false,$6,$7) RETURNING template_id`,
+          [
+            `${source.client_id}-${crypto.randomUUID().slice(0, 8)}`,
+            source.client_id,
+            title,
+            source.category,
+            source.source_file,
+            source.investigation_type,
+            auth.user.user_id,
+          ],
+        );
+        const [copy] = await query(
+          `INSERT INTO template_versions(template_id,version_no,status,layout_mode,definition,bindings,slots,source_file_id,layout_path,
+             layout_sha256,warnings,acknowledged,change_note,created_by,based_on_version_id)
+           SELECT $2,1,'draft',layout_mode,definition,bindings,slots,source_file_id,layout_path,layout_sha256,warnings,acknowledged,
+             $3,$4,version_id FROM template_versions WHERE version_id = $1 RETURNING *`,
+          [version.version_id, family!.template_id, `نسخة من «${source.title}» الإصدار ${version.version_no}`, auth.user.user_id],
+        );
+        return { templateId: family!.template_id as string, version: copy! };
+      });
+      await logTemplateEvent({ type: "template.created", template_id: result.templateId, actor_id: auth.user.user_id, note: title });
+      await logTemplateEvent({
+        type: "version.cloned",
+        template_id: result.templateId,
+        version_id: result.version.version_id as string,
+        actor_id: auth.user.user_id,
+        metadata: { from_template: source.template_id, from_version: version.version_no },
+      });
+      await recordAudit({
+        event: "template.version_drafted",
+        actorId: auth.user.user_id,
+        success: true,
+        context,
+        metadata: { template_id: result.templateId, copied_from: source.template_id },
+      });
+      return created({ template_id: result.templateId, version: versionSummary(result.version) });
+    }),
+  );
+
   router.delete(
     "/forms/admin/versions/:version_id",
     withPermission(MANAGE, async (context, auth) => {
