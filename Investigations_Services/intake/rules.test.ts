@@ -9,8 +9,13 @@ import {
   isNationalId,
   isReplySubject,
   isSystemMail,
+  kindsOverlap,
   normalizeMobile,
   releaseTime,
+  requestKind,
+  safeInlineType,
+  samePerson,
+  senderVerified,
 } from "./rules.ts";
 import { casesFromGrid, fieldOfHeader, splitLabelledAddress } from "./tables.ts";
 import { whyOpen } from "../followup.ts";
@@ -63,14 +68,14 @@ describe("what the client asks for", () => {
 
   test("«عملاء» and «معاملات» are not «عمل»", () => {
     expect(detectKind("عملاء اليوم")).toBeNull();
-    expect(detectKind("معاملات شركة جميل للتمويل")).toBeNull();
+    expect(detectKind("معاملات شركة تجريبية")).toBeNull();
   });
 
   test("fast only when marked, never from a legal footer", () => {
     expect(detectFast("Fast Track\nبرجاء اجراء استعلام سكن", [])).toBe(true);
-    expect(detectFast("استعلام عاجل عن مستعلمين جدد", [])).toBe(true);
+    expect(detectFast("طلب عاجل تجريبي", [])).toBe(true);
     expect(detectFast("RE: استعجال", [])).toBe(true);
-    expect(detectFast("Golden 03/11/2026 Auto cases 1", [])).toBe(false);
+    expect(detectFast("Agency 01/01/2030 Auto cases 1", [])).toBe(false);
     expect(detectFast("any use is expressly prohibited", [])).toBe(false);
     expect(detectFast("VIP client", ["vip"])).toBe(true);
   });
@@ -81,7 +86,7 @@ describe("national IDs and phones", () => {
     expect(isNationalId("29001011234567")).toBe(true);
     expect(isNationalId("٢٩٠٠١٠١١٢٣٤٥٦٧")).toBe(true);
     expect(isNationalId("29013011234567")).toBe(false); // month 13
-    expect(isNationalId("1002638866")).toBe(false);
+    expect(isNationalId("1000000001")).toBe(false);
     expect(findNationalId("عميل تجريبي      29001011234567")).toBe("29001011234567");
   });
 
@@ -89,7 +94,7 @@ describe("national IDs and phones", () => {
     expect(normalizeMobile("1001234567")).toBe("01001234567");
     expect(normalizeMobile("+20 100 123 4567")).toBe("01001234567");
     expect(normalizeMobile("0122 765 4321")).toBe("01227654321");
-    expect(normalizeMobile("16300")).toBeNull();
+    expect(normalizeMobile("12345")).toBeNull();
   });
 });
 
@@ -98,8 +103,8 @@ describe("what is not a new request", () => {
     expect(isReplySubject("RE: Home investigation")).toBe(true);
     expect(isReplySubject("رد: عميل جديد")).toBe(true);
     expect(isReplySubject("FW: Home investigation")).toBe(false);
-    expect(isSystemMail("mailer-daemon@secureserver.net", "Message Delivery Failure")).toBe(true);
-    expect(isSystemMail("postmaster@boa.egypt", "Undeliverable: احمد")).toBe(true);
+    expect(isSystemMail("mailer-daemon@mail.example", "Message Delivery Failure")).toBe(true);
+    expect(isSystemMail("postmaster@bank.example", "Undeliverable: request")).toBe(true);
     expect(isSystemMail("a@bank.example", "Home investigation")).toBe(false);
   });
 
@@ -139,12 +144,12 @@ describe("tables", () => {
   test("a one-person sheet written as label | value", () => {
     const cases = casesFromGrid([
       ["عميل تجريبي", "اسم العميل"],
-      ["28802011234567", "الرقم القومي"],
+      ["29002021234567", "الرقم القومي"],
       ["01011112222", "الموبايل"],
       ["عمارة 1 الدور الاول مجاورة 3 الحي الاول", "عنوان السكن"],
     ]);
     expect(cases).toHaveLength(1);
-    expect(cases[0]).toMatchObject({ national_id: "28802011234567", home_address: "عمارة 1 الدور الاول مجاورة 3 الحي الاول" });
+    expect(cases[0]).toMatchObject({ national_id: "29002021234567", home_address: "عمارة 1 الدور الاول مجاورة 3 الحي الاول" });
   });
 
   test("«Governate : … , Area : …» addresses are split", () => {
@@ -163,5 +168,40 @@ describe("why a case is still open", () => {
   test("late at the investigator", () => {
     const row = { ...base, status: "in_progress", assignee_name: "أحمد", due_at: new Date(Date.now() - 3_600_000) };
     expect(whyOpen(row)).toEqual({ reason: "متأخرة عند أحمد", level: "late" });
+  });
+});
+
+describe("what must never go out automatically", () => {
+  test("signatures and form labels do not choose the form", () => {
+    expect(detectKind("New request\nTeam Leader\nHead Office - Operations")).toBeNull();
+    expect(detectKind("New request\nField Investigation Officer")).toBeNull();
+    expect(detectKind("warehouse network officer")).toBeNull();
+    expect(detectKind("استعلام سكن\nجهة العمل\nعنوان العمل")).toBe("home");
+    expect(detectKind("Type: work\nHome address\nCompany Address")).toBe("work");
+  });
+
+  test("a forwarder's own line beats the email underneath", () => {
+    expect(requestKind("FW: request", "استعلام سكن\n\nFrom: branch\nاستعلام عمل")).toBe("home");
+    expect(requestKind("FW: request", "Good day\n\nFrom: branch\nHome investigation")).toBe("home");
+  });
+
+  test("only the mail server's DMARC pass verifies a sender", () => {
+    expect(senderVerified("mx.example; spf=pass; dmarc=pass header.from=bank.example")).toBe(true);
+    expect(senderVerified("mx.example; spf=pass; dmarc=fail header.from=bank.example")).toBe(false);
+    expect(senderVerified('mx.example; spf=pass smtp.mailfrom="x; dmarc=pass"@evil.example; dmarc=fail')).toBe(false);
+    expect(senderVerified(null)).toBe(false);
+  });
+
+  test("repeated requests are recognised", () => {
+    expect(samePerson({ subject_name: "عميل  تجريبي" }, { subject_name: "عميل تجريبي" })).toBe(true);
+    expect(samePerson({ subject_name: "أ", national_id: "1" }, { subject_name: "أ", national_id: "2" })).toBe(false);
+    expect(samePerson({}, {})).toBe(false);
+    expect(kindsOverlap("home", "home_work")).toBe(true);
+    expect(kindsOverlap("home", "work")).toBe(false);
+  });
+
+  test("active content from an email is never shown", () => {
+    for (const type of ["text/html", "image/svg+xml", "application/xhtml+xml", "text/xml", ""]) expect(safeInlineType(type)).toBeNull();
+    expect(safeInlineType("application/pdf")).toBe("application/pdf");
   });
 });

@@ -3,7 +3,7 @@ import { simpleParser, type AddressObject } from "mailparser";
 import nodemailer from "nodemailer";
 import { query } from "../../IdentityAcess_Services/Config/db.ts";
 import { putStoredFile } from "../../IdentityAcess_Services/Utils/files.ts";
-import { domainOf } from "./rules.ts";
+import { domainOf, senderVerified } from "./rules.ts";
 
 /**
  * The company inboxes. Settings come from the environment only (never the database or git):
@@ -61,6 +61,11 @@ export async function pollInbox(inbox: Inbox): Promise<number> {
     logger: false,
     socketTimeout: 120_000,
   });
+  // Without a listener a dropped or timed-out connection is an unhandled 'error' event, which
+  // ends the whole investigations service. The pending call rejects and pollAll records it.
+  client.on("error", (error: Error) =>
+    console.error(JSON.stringify({ level: "warn", message: "mail.connection_error", inbox: inbox.name, error: error.message })),
+  );
   await client.connect();
   let added = 0;
   try {
@@ -133,8 +138,8 @@ async function storeMessage(inbox: string, uid: number, source: Buffer): Promise
   const from = parsed.from?.value[0];
   await query(
     `INSERT INTO mail_messages(message_id, inbox, uid, header_message_id, from_address, from_name, from_domain,
-       to_addresses, cc_addresses, subject, body_text, received_at, raw_path, attachments, status)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::text::jsonb,'new')`,
+       to_addresses, cc_addresses, subject, body_text, received_at, raw_path, attachments, sender_verified, status)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::text::jsonb,$15,'new')`,
     [
       id,
       inbox,
@@ -150,6 +155,7 @@ async function storeMessage(inbox: string, uid: number, source: Buffer): Promise
       parsed.date ?? new Date(),
       rawPath,
       JSON.stringify(attachments),
+      senderVerified(parsed.headerLines.find((header) => header.key === "authentication-results")?.line.replace(/^[^:]+:/, "")),
     ],
   );
 }

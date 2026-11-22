@@ -367,6 +367,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_mail_message ON mail_messages (inbox, uid, 
 CREATE INDEX IF NOT EXISTS idx_mail_messages_status ON mail_messages (status, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_mail_messages_client ON mail_messages (client_id, received_at DESC);
 
+-- Whether the receiving mail server confirmed the sender's domain (DMARC); From alone can be forged.
+ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS sender_verified boolean;
+-- When reading started, so only a reading that really stopped is picked up again.
+ALTER TABLE mail_messages ADD COLUMN IF NOT EXISTS processing_since timestamptz;
+
 -- One person to investigate, read from an email (an Excel row, a body form, a scanned page).
 CREATE TABLE IF NOT EXISTS mail_cases (
   case_id text PRIMARY KEY DEFAULT gen_random_uuid()::text,

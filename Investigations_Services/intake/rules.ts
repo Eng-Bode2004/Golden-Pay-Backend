@@ -106,15 +106,22 @@ export function normalizeMobile(value: string): string | null {
   return /^01[0125]\d{8}$/.test(digits) ? digits : null;
 }
 
-/** What is being asked for, from the words the client uses. Null when nothing says. */
+/** Words in every email whatever is asked: form labels and job titles in signatures. */
+const NOT_THE_REQUEST =
+  /home address|company address|business address|work address|head office|field investigation (officer|unit|department)|عنوان (ال)?(سكن|عمل|منزل)|(عنوان |اسم )?جهه (ال)?عمل/g;
+
+/**
+ * What is being asked for, from the words the client uses. Null when nothing says: the case
+ * then waits for a person. A wrong guess sends the wrong form, so only whole words count.
+ */
 export function detectKind(text: string): CaseKind | null {
-  const t = normalizeText(text);
-  if (/تشطيب/.test(t)) return "finishing";
-  const home = /سكن|منزل|محل الاقامه|home|residence|house/.test(t);
-  // «عمل» as a word (not «عملاء» or «معاملات»).
-  const work = /(^|[^\p{L}])(ال)?عمل($|[^\p{L}])|وظيفه|\bwork\b|employer|business address|office/u.test(t);
+  const t = normalizeText(text).replace(NOT_THE_REQUEST, " ");
+  const word = (pattern: string) => new RegExp(`(^|[^\\p{L}])(${pattern})($|[^\\p{L}])`, "u").test(t);
+  if (word("(ال)?تشطيب")) return "finishing";
   if (/سكن\s*و\s*(ال)?عمل|home\s*(and|&)\s*work|work\s*(and|&)\s*home/.test(t)) return "home_work";
-  if (/ميداني|منشاه|مصنع|مورد|supplier|field|زياره المقر|زياره جميع المقرات/.test(t)) return "business";
+  if (word("(ال)?ميداني|(ال)?ميدانيه|(ال)?منشاه|(ال)?مصنع|موردين|field visit|زياره (المقر|جميع المقرات)")) return "business";
+  const home = word("(ال)?سكن|(ال)?منزل|محل الاقامه|home|residence");
+  const work = word("(ال)?عمل|work");
   if (home && work) return "home_work";
   if (home) return "home";
   if (work) return "work";
@@ -177,4 +184,47 @@ export function domainMatches(domain: string, domains: string[]): boolean {
     const want = d.trim().toLowerCase().replace(/^@/, "");
     return want && (domain === want || domain.endsWith(`.${want}`));
   });
+}
+
+/**
+ * Whether the receiving server confirmed the From domain. Only the top Authentication-Results
+ * header counts: our mail server writes that one, lower ones could arrive with the email.
+ */
+export function senderVerified(topAuthenticationResults: string | null | undefined): boolean {
+  return /(^|;)\s*dmarc=pass\b/i.test((topAuthenticationResults ?? "").replace(/"[^"]*"/g, ""));
+}
+
+interface Person {
+  subject_name?: unknown;
+  national_id?: unknown;
+}
+
+/** The same applicant: by national ID when both have one, otherwise by the full name. */
+export function samePerson(a: Person, b: Person): boolean {
+  if (a.national_id && b.national_id) return a.national_id === b.national_id;
+  const name = normalizeText(String(a.subject_name ?? ""));
+  return name !== "" && name === normalizeText(String(b.subject_name ?? ""));
+}
+
+/** Two requests for one person that would send investigators to the same place twice. */
+export function kindsOverlap(a: CaseKind | null, b: CaseKind | null): boolean {
+  if (!a || !b || a === b) return true;
+  const both = [a, b];
+  return both.includes("home_work") && (both.includes("home") || both.includes("work"));
+}
+
+/** Types a browser may show. Anything else from an email is only ever downloaded. */
+export function safeInlineType(type: string): string | null {
+  const t = type.split(";")[0]!.trim().toLowerCase();
+  if (t === "image/jpg") return "image/jpeg";
+  return ["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"].includes(t) ? t : null;
+}
+
+/**
+ * The kind a whole email asks for. In a forward the sender's own line at the top decides;
+ * the older email underneath only counts when that line says nothing.
+ */
+export function requestKind(subject: string, body: string): CaseKind | null {
+  const own = freshBody(body);
+  return detectKind(own) ?? detectKind(`${subject}\n${isForward(subject) ? body : own}`);
 }

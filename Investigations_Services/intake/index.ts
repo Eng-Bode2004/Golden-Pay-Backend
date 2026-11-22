@@ -9,7 +9,7 @@ import { optionalText, requiredText } from "../../Shared/service.ts";
 import { aiConfigured, AI_MODEL } from "./ai.ts";
 import { configuredInboxes, pollAll, sendFromInbox } from "./inbox.ts";
 import { loadProfiles, processMessage } from "./process.ts";
-import { KIND_LABELS, releaseTime, type CaseKind } from "./rules.ts";
+import { KIND_LABELS, releaseTime, safeInlineType, type CaseKind } from "./rules.ts";
 
 type Row = Record<string, unknown>;
 const MANAGE = PERMISSIONS.INVESTIGATIONS_MANAGE;
@@ -39,7 +39,18 @@ async function release(caseId: string, deps: IntakeDeps): Promise<{ ok: boolean;
     [caseId],
   );
   if (!item) return { ok: false, reason: "not ready" };
+  const alreadyCreated = async () => {
+    const [existing] = await query("SELECT investigation_id FROM investigations WHERE mail_case_id=$1 LIMIT 1", [caseId]);
+    if (!existing) return false;
+    await query("UPDATE mail_cases SET status='sent', investigation_id=$2, reason=NULL, updated_at=now() WHERE case_id=$1", [
+      caseId,
+      existing.investigation_id,
+    ]);
+    return true;
+  };
   try {
+    // A retry after a crash or a double click never creates a second investigation.
+    if (await alreadyCreated()) return { ok: true };
     const profile = (await loadProfiles()).find((p) => p.client_id === item.client_id);
     if (!profile) throw new Error("لم تعد هذه الجهة مضبوطة لاستقبال البريد");
     const templateId = profile.templates[item.kind as CaseKind];
@@ -100,6 +111,8 @@ async function release(caseId: string, deps: IntakeDeps): Promise<{ ok: boolean;
     ]);
     return { ok: true };
   } catch (error) {
+    // Saved, then offering it failed: the case exists, so it must not be offered for a retry.
+    if (await alreadyCreated()) return { ok: true };
     const reason = (error instanceof Error ? error.message : String(error)).slice(0, 500);
     await query("UPDATE mail_cases SET status='failed', reason=$2, updated_at=now() WHERE case_id=$1", [caseId, reason]);
     return { ok: false, reason };
@@ -110,17 +123,23 @@ let ticking = false;
 async function tick(deps: IntakeDeps): Promise<void> {
   if (ticking) return;
   ticking = true;
+  // What is due goes out first and between readings: a slow AI reading never holds back 08:00.
+  const releaseDue = async () => {
+    const due = await query("SELECT case_id FROM mail_cases WHERE status='ready' AND release_at <= now() ORDER BY release_at LIMIT 50");
+    for (const row of due) await release(row.case_id as string, deps);
+  };
   try {
+    await releaseDue();
     await pollAll();
     // Read what arrived (one at a time: the AI reader is the slow part).
     const fresh = await query("SELECT message_id FROM mail_messages WHERE status='new' ORDER BY received_at LIMIT 20");
-    for (const row of fresh) await processMessage(row.message_id as string);
-    // Send what is due: 08:00–16:00 at once, the night's cases at 08:00.
-    const due = await query("SELECT case_id FROM mail_cases WHERE status='ready' AND release_at <= now() ORDER BY release_at LIMIT 50");
-    for (const row of due) await release(row.case_id as string, deps);
+    for (const row of fresh) {
+      await processMessage(row.message_id as string);
+      await releaseDue();
+    }
     // A worker that stopped mid-send leaves 'sending' rows: give them back after 10 minutes.
     await query("UPDATE mail_cases SET status='ready' WHERE status='sending' AND updated_at < now() - interval '10 minutes'");
-    await query("UPDATE mail_messages SET status='new' WHERE status='processing' AND processed_at IS NULL AND created_at < now() - interval '15 minutes'");
+    await query("UPDATE mail_messages SET status='new' WHERE status='processing' AND COALESCE(processing_since, created_at) < now() - interval '15 minutes'");
   } catch (error) {
     console.error(JSON.stringify({ level: "error", message: "mail.tick_failed", error: error instanceof Error ? error.message : String(error) }));
   } finally {
@@ -257,10 +276,14 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
       const file = ((message?.attachments as Row[]) ?? []).find((a) => String(a.index) === context.params.index);
       if (!file) throw ApiError.notFound("Attachment not found");
       const bytes = await getStoredFile(file.path as string);
+      // Anyone can email us: HTML or SVG shown in the dashboard's origin could take the admin's session.
+      const shown = safeInlineType(String(file.type ?? ""));
       return new Response(bytes as unknown as BodyInit, {
         headers: {
-          "Content-Type": (file.type as string) || "application/octet-stream",
-          "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(file.name as string)}`,
+          "Content-Type": shown ?? "application/octet-stream",
+          "X-Content-Type-Options": "nosniff",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Disposition": `${shown ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(file.name as string)}`,
           "Cache-Control": "private, max-age=300",
         },
       });

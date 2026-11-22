@@ -9,17 +9,19 @@ import {
   DEFAULT_IGNORE_WORDS,
   isForward,
   detectFast,
-  detectKind,
   domainMatches,
   findNationalId,
   freshBody,
   isNationalId,
   isReplySubject,
   isSystemMail,
+  kindsOverlap,
   KIND_LABELS,
   normalizeMobile,
   normalizeText,
   releaseTime,
+  requestKind,
+  samePerson,
   type CaseKind,
 } from "./rules.ts";
 import { casesFromGrid, htmlTables, looksComplete, type ExtractedCase } from "./tables.ts";
@@ -137,9 +139,13 @@ export interface ProcessOutcome {
 
 /** Turns one stored email into cases (or a clear reason why not). Safe to run again. */
 export async function processMessage(messageId: string): Promise<ProcessOutcome> {
-  const [message] = await query("SELECT * FROM mail_messages WHERE message_id=$1", [messageId]);
-  if (!message) throw new Error("Email not found");
-  await query("UPDATE mail_messages SET status='processing' WHERE message_id=$1", [messageId]);
+  // One reader at a time: the timer and «read again» never work on the same email together.
+  const [message] = await query(
+    `UPDATE mail_messages SET status='processing', processing_since=now()
+     WHERE message_id=$1 AND status <> 'processing' RETURNING *`,
+    [messageId],
+  );
+  if (!message) return { status: "processing", reason: null, cases: 0 };
   try {
     const outcome = await read(message);
     await query("UPDATE mail_messages SET status=$2, reason=$3, processed_at=now() WHERE message_id=$1", [
@@ -168,6 +174,14 @@ async function read(message: Row): Promise<ProcessOutcome> {
     await learnContacts(profile.client_id, message);
   }
   if (!profile) return { status: "unknown_sender", reason: `الدومين ${domain || "—"} غير مربوط بأي جهة`, cases: 0 };
+  // One email sent to two of our inboxes is one request.
+  if (message.header_message_id) {
+    const [copy] = await query(
+      `SELECT inbox FROM mail_messages WHERE header_message_id=$1 AND from_address=$2 AND message_id <> $3 AND created_at < $4 LIMIT 1`,
+      [message.header_message_id, from, message.message_id, message.created_at],
+    );
+    if (copy) return { status: "ignored", reason: `نسخة من بريد وصل على ${copy.inbox}`, cases: 0 };
+  }
   // Replies in a thread are conversation (questions, reminders, complaints), never new cases.
   if (isReplySubject(subject)) return { status: "reply", reason: "رد على رسالة سابقة", cases: 0 };
 
@@ -183,7 +197,7 @@ async function read(message: Row): Promise<ProcessOutcome> {
     return { status: "ignored", reason: "يحتوي على كلمة تجاهل لهذه الجهة", cases: 0 };
   }
 
-  const emailKind = detectKind(requestText);
+  const emailKind = requestKind(subject, plain);
   const emailFast = detectFast(requestText, profile.fast_words.length ? profile.fast_words : DEFAULT_FAST_WORDS);
   const attachments = ((message.attachments as Attachment[]) ?? []).filter((file) => !isDecoration(file));
 
@@ -208,8 +222,8 @@ async function read(message: Row): Promise<ProcessOutcome> {
   let aiUsed = false;
 
   // 2. Everything else (handwritten photos, scans, PDFs, free text): the AI reader.
-  const tablesComplete = cases.length > 0 && cases.every(looksComplete);
-  if (!tablesComplete) {
+  // Rows read exactly are never replaced by a model's reading: incomplete rows go to review.
+  if (!cases.some(looksComplete)) {
     if (!aiConfigured()) {
       if (!cases.length) return { status: "review", reason: "يحتاج قراءة يدوية (القراءة الذكية غير مفعّلة)", cases: 0 };
     } else {
@@ -251,14 +265,34 @@ async function read(message: Row): Promise<ProcessOutcome> {
   if (!cases.length) return { status: "review", reason: "لم يُعثر على أشخاص في البريد", cases: 0 };
 
   // 3. Each person becomes a case: checked, placed, timed.
-  await query("DELETE FROM mail_cases WHERE message_id=$1 AND status IN ('review','ready')", [message.message_id]);
+  await query("DELETE FROM mail_cases WHERE message_id=$1 AND status IN ('review','ready','failed')", [message.message_id]);
+  // Reading again never repeats a person already sent or rejected from this email.
+  const handled = await query("SELECT kind, fields FROM mail_cases WHERE message_id=$1", [message.message_id]);
+  const earlier = await query(
+    `SELECT kind, fields FROM mail_cases WHERE client_id=$1 AND message_id <> $2 AND status <> 'rejected'
+       AND created_at > now() - interval '30 days'`,
+    [profile.client_id, message.message_id],
+  );
+  const inThisEmail: { kind: CaseKind | null; fields: Awaited<ReturnType<typeof placed>> }[] = [];
+  let added = 0;
   const received = new Date(message.received_at as string);
   let ready = 0;
   for (const item of cases) {
     const kind = item.kind ?? emailKind;
     const fast = item.fast || emailFast;
     const fields = await placed(item, kind);
+    const repeats = (other: { kind?: unknown; fields?: unknown }) =>
+      samePerson(fields, other.fields as Record<string, unknown>) && kindsOverlap(kind, (other.kind as CaseKind | null) ?? null);
+    if (handled.some(repeats)) continue;
+    const twin = inThisEmail.filter(repeats);
+    // The same row twice (the body table and its Excel copy) is one case.
+    if (twin.some((other) => other.kind === kind && other.fields.address === fields.address)) continue;
+    inThisEmail.push({ kind, fields });
+    added += 1;
     const reasons = [...item.doubts];
+    if (twin.length) reasons.push("الشخص مكرر في نفس البريد");
+    if (earlier.some(repeats)) reasons.push("طلب مكرر محتمل: وصل لنفس الشخص خلال 30 يومًا");
+    if (message.sender_verified !== true) reasons.push("لم يؤكد خادم البريد هوية المرسل");
     if (aiUsed && item.source === "ai" && item.confidence < AUTO_CONFIDENCE) reasons.push("القراءة غير مؤكدة");
     if (!fields.subject_name) reasons.push("لا يوجد اسم");
     if (!fields.address) reasons.push("لا يوجد عنوان");
@@ -289,11 +323,11 @@ async function read(message: Row): Promise<ProcessOutcome> {
     );
     if (status === "ready") ready += 1;
   }
-  const waiting = cases.length - ready;
+  const waiting = added - ready;
   return {
     status: waiting ? "review" : "cases",
-    reason: waiting ? `${waiting} من ${cases.length} تحتاج مراجعة` : null,
-    cases: cases.length,
+    reason: waiting ? `${waiting} من ${added} تحتاج مراجعة` : null,
+    cases: added,
   };
 }
 
