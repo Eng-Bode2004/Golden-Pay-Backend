@@ -106,6 +106,57 @@ describe.skipIf(!usable)("clean-ups on PostgreSQL", () => {
     expect(await count("SELECT count(*)::int AS n FROM investigations WHERE investigation_id = ANY($1)", [[open, done]])).toBe(0);
   });
 
+  test("deleting one investigation removes everything about it, its excuse charge too, and nothing else", async () => {
+    const investigator = await person("employee");
+    const gone = await newCase(investigator, "approved");
+    const kept = await newCase(investigator, "approved");
+    await db.query(
+      "INSERT INTO investigation_images (investigation_id, field_key, path, uploaded_by) VALUES ($1, 'visit_selfie', 'x/selfie.jpg', $2)",
+      [gone, investigator],
+    ).catch(() => {});
+    await db.query("INSERT INTO investigation_events (investigation_id, type) VALUES ($1, 'approved')", [gone]).catch(() => {});
+    const [charge] = await db.query(
+      "INSERT INTO payroll_adjustments (user_id, month, amount, note) VALUES ($1, date_trunc('month', now()), -50, 'excuse') RETURNING adjustment_id",
+      [investigator],
+    );
+    const [other] = await db.query(
+      "INSERT INTO payroll_adjustments (user_id, month, amount, note) VALUES ($1, date_trunc('month', now()), 20, 'bonus') RETURNING adjustment_id",
+      [investigator],
+    );
+    await db.query(
+      "INSERT INTO investigation_excuses (investigation_id, user_id, reference, reason, penalty, adjustment_id) VALUES ($1, $2, $1, 'r', 50, $3)",
+      [gone, investigator, charge!.adjustment_id],
+    );
+    await db.query("INSERT INTO notifications (user_id, kind, title, body, investigation_id) VALUES ($1, 'offer', 't', 'b', $2)", [
+      investigator,
+      gone,
+    ]);
+    await db.query("INSERT INTO notifications (user_id, kind, title, body, investigation_id) VALUES ($1, 'offer', 't', 'b', $2)", [
+      investigator,
+      kept,
+    ]);
+    await db.query(
+      "INSERT INTO mail_sent (investigation_id, inbox, to_addresses, subject, body, status) VALUES ($1, 'retail', ARRAY['a@example.com'], 's', 'b', 'sent')",
+      [gone],
+    ).catch(() => {});
+
+    const result = await cleanup.deleteInvestigation(gone);
+    expect(result.excuses_cancelled).toBe(1);
+    expect(result.charges_removed).toBe(1);
+    expect(result.notifications_deleted).toBe(1);
+    expect(await count("SELECT count(*)::int AS n FROM investigations WHERE investigation_id = $1", [gone])).toBe(0);
+    for (const table of ["investigation_images", "investigation_events", "investigation_locations", "investigation_excuses", "notifications", "mail_sent"]) {
+      expect(await count(`SELECT count(*)::int AS n FROM ${table} WHERE investigation_id = $1`, [gone])).toBe(0);
+    }
+    expect(await count("SELECT count(*)::int AS n FROM payroll_adjustments WHERE adjustment_id = $1", [charge!.adjustment_id])).toBe(0);
+    // The other case, its notification and the investigator's other money stay.
+    expect(await count("SELECT count(*)::int AS n FROM investigations WHERE investigation_id = $1", [kept])).toBe(1);
+    expect(await count("SELECT count(*)::int AS n FROM notifications WHERE investigation_id = $1", [kept])).toBe(1);
+    expect(await count("SELECT count(*)::int AS n FROM payroll_adjustments WHERE adjustment_id = $1", [other!.adjustment_id])).toBe(1);
+    expect(await count("SELECT count(*)::int AS n FROM users WHERE user_id = $1", [investigator])).toBe(1);
+    await expect(cleanup.deleteInvestigation(gone)).rejects.toThrow(/not found/i);
+  });
+
   test("administrators and head office cannot be deleted as investigators", async () => {
     for (const role of ["admin", "head_office"]) {
       const id = await person(role);

@@ -38,6 +38,91 @@ export async function purgeInvestigations(where: string, params: unknown[] = [])
   return { investigations: deleted.length, files: files.length };
 }
 
+export interface InvestigationDeletion {
+  investigation_id: string;
+  reference: string;
+  status: string;
+  files_deleted: number;
+  /** Excuses made on the case; their charges were taken off the investigators' payroll. */
+  excuses_cancelled: number;
+  charges_removed: number;
+  notifications_deleted: number;
+  emails_deleted: number;
+  /** Set when the case came from an email: that email case is marked as rejected. */
+  mail_case_closed: boolean;
+}
+
+/** Tables another service creates; one it has not created yet holds nothing to delete. */
+async function tableExists(name: string): Promise<boolean> {
+  const [row] = await query("SELECT to_regclass($1) IS NOT NULL AS present", [`public.${name}`]);
+  return Boolean(row?.present);
+}
+
+/**
+ * Deletes one investigation and everything about it: its photos (the investigator's selfie
+ * and ID too), reports, events, trail, offers, assignments and dispatch records; its excuses
+ * with their payroll charges; its notifications and the report emails sent for it. Its stored
+ * files are removed. An approved case's pay and price leave the month's totals with it.
+ * A case that came from an email is marked rejected there, so it is not sent out again.
+ */
+export async function deleteInvestigation(investigationId: string): Promise<InvestigationDeletion> {
+  const [row] = await query("SELECT investigation_id, reference, status FROM investigations WHERE investigation_id = $1", [
+    investigationId,
+  ]);
+  if (!row) throw ApiError.notFound("Investigation not found");
+  const files = await filesOf("investigation_id = $1", [investigationId]);
+  const [hasNotifications, hasMailSent, hasMailCases] = [
+    await tableExists("notifications"),
+    await tableExists("mail_sent"),
+    await tableExists("mail_cases"),
+  ];
+
+  const counts = await transaction(async () => {
+    const excuses = await query("DELETE FROM investigation_excuses WHERE investigation_id = $1 RETURNING adjustment_id", [
+      investigationId,
+    ]);
+    const charges = excuses.map((excuse) => excuse.adjustment_id as string | null).filter((id): id is string => Boolean(id));
+    const removed = charges.length
+      ? await query("DELETE FROM payroll_adjustments WHERE adjustment_id = ANY($1::text[]) RETURNING adjustment_id", [charges])
+      : [];
+    const notifications = hasNotifications
+      ? await query("DELETE FROM notifications WHERE investigation_id = $1 RETURNING notification_id", [investigationId])
+      : [];
+    const emails = hasMailSent
+      ? await query("DELETE FROM mail_sent WHERE investigation_id = $1 RETURNING sent_id", [investigationId])
+      : [];
+    const mailCases = hasMailCases
+      ? await query(
+          `UPDATE mail_cases SET status = 'rejected', reason = 'حُذف الاستعلام من النظام', investigation_id = NULL, updated_at = now()
+           WHERE investigation_id = $1 RETURNING case_id`,
+          [investigationId],
+        )
+      : [];
+    // Photos, events, trail, offers, assignments and dispatch records go with it (cascade).
+    await query("DELETE FROM investigations WHERE investigation_id = $1", [investigationId]);
+    return {
+      excuses: excuses.length,
+      charges: removed.length,
+      notifications: notifications.length,
+      emails: emails.length,
+      mail: mailCases.length > 0,
+    };
+  });
+  // Storage is cleaned after the rows are gone; a file that fails to delete is only space.
+  await deleteStoredFiles(files);
+  return {
+    investigation_id: investigationId,
+    reference: String(row.reference ?? ""),
+    status: String(row.status ?? ""),
+    files_deleted: files.length,
+    excuses_cancelled: counts.excuses,
+    charges_removed: counts.charges,
+    notifications_deleted: counts.notifications,
+    emails_deleted: counts.emails,
+    mail_case_closed: counts.mail,
+  };
+}
+
 export interface InvestigatorDeletion {
   user_id: string;
   full_name: string;

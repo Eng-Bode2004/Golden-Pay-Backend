@@ -1,7 +1,7 @@
 // Admin clean-ups that cannot be undone: deleting an investigator with all their data, and
 // clearing test data (every investigation, investigators' points and money). Each asks for
 // the administrator's password again; the full reset is for the primary administrator only.
-import { deleteInvestigator, previewTestDataReset, resetTestData } from "../../Shared/cleanup.ts";
+import { deleteInvestigation, deleteInvestigator, previewTestDataReset, resetTestData } from "../../Shared/cleanup.ts";
 import { type AuthContext, withPermission } from "../MIddlewares/auth.middleware.ts";
 import { byIp, rateLimit, RATE_LIMITS } from "../MIddlewares/rateLimit.middleware.ts";
 import { query } from "../Config/db.ts";
@@ -39,6 +39,28 @@ export function registerCleanupRoutes(router: Router): void {
         const result = await deleteInvestigator(userId, { deleteReports: body.delete_reports === true });
         await recordAudit({
           event: "admin.investigator.deleted",
+          userId: auth.user.user_id,
+          employeeNumber: auth.user.employee_number ?? null,
+          success: true,
+          context,
+          metadata: result as unknown as Record<string, unknown>,
+        });
+        return ok({ deleted: result });
+      }),
+    ),
+  );
+
+  /** One investigation and everything about it, for good. Any administrator, password again. */
+  router.delete(
+    "/admin/investigations/:id",
+    limit(
+      withPermission(PERMISSIONS.INVESTIGATIONS_MANAGE, async (context: RequestContext, auth: AuthContext) => {
+        const body = await readJson(context.req);
+        await confirmPassword(auth, body);
+        const result = await deleteInvestigation(context.params.id ?? "");
+        // The reference and counts only: no customer name, phone or address in the log.
+        await recordAudit({
+          event: "admin.investigation.deleted",
           userId: auth.user.user_id,
           employeeNumber: auth.user.employee_number ?? null,
           success: true,
