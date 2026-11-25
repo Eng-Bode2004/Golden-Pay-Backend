@@ -41,7 +41,10 @@ export function pickForms(forms: FormRow[]): Partial<Record<CaseKind, string>> {
     if (choice) picked[kind] = choice.template_id;
   }
   const business = typed.filter((form) => ["company", "sme", "site_visit"].includes(form.type ?? ""));
+  // A client with no company form but one merchant form («استعلام تجار» is filed as «تكويد تاجر»).
+  const merchant = typed.filter((form) => ["merchant_coding", "business_owner"].includes(form.type ?? ""));
   if (business.length === 1) picked.business = business[0]!.template_id;
+  else if (!business.length && merchant.length === 1) picked.business = merchant[0]!.template_id;
   return picked;
 }
 

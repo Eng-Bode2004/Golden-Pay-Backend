@@ -103,6 +103,20 @@ describe("what to visit", () => {
     ];
     expect(pickForms(forms)).toEqual({ home: "h", work: "w" });
   });
+
+  test("Mogo's «استعلام تجار» is its merchant visit; a company form still comes first elsewhere", () => {
+    const mogo = [
+      { template_id: "h", title: "استعلام سكن", investigation_type: null },
+      { template_id: "w", title: "استعلام عمل", investigation_type: null },
+      { template_id: "m", title: "استعلام تجار", investigation_type: null },
+    ];
+    expect(pickForms(mogo)).toEqual({ home: "h", work: "w", business: "m" });
+    const bank = [
+      { template_id: "c", title: "استعلام شركات", investigation_type: "company" },
+      { template_id: "o", title: "استعلام أصحاب الاعمال", investigation_type: "business_owner" },
+    ];
+    expect(pickForms(bank)).toEqual({ business: "c" });
+  });
 });
 
 describe("lists that are not new requests", () => {
