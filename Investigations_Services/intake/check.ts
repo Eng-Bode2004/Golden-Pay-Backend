@@ -107,7 +107,7 @@ export async function runSystemCheck(deps: {
   else add("loop", "الاستقبال التلقائي", "ok", "يعمل");
 
   const inboxes = configuredInboxes();
-  if (!inboxes.length) add("inboxes", "صناديق البريد", "fail", "MAIL_INBOXES وبياناتها غير مضبوطة على الخادم");
+  if (!inboxes.length) add("inboxes", "صناديق البريد", "fail", "لا يوجد صندوق بريد مضبوط: RETAIL و RETAIL_PASS (وكذلك INFO و SME) أو MAIL_INBOXES");
   for (const { inbox, result } of await Promise.all(inboxes.map(async (inbox) => ({ inbox, result: await testInbox(inbox) })))) {
     add(`read:${inbox.name}`, `استقبال ${inbox.name}`, result.read ? "fail" : "ok", result.read ?? "تم الدخول");
     add(`send:${inbox.name}`, `إرسال ${inbox.name}`, result.send ? "fail" : "ok", result.send ?? "جاهز للإرسال، ولم يُرسل شيء");

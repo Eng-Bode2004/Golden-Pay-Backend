@@ -22,17 +22,25 @@ export interface Inbox {
   pass: string;
 }
 
-export function configuredInboxes(): Inbox[] {
-  return (process.env.MAIL_INBOXES ?? "")
+/** The company's three inboxes, also when set as RETAIL / RETAIL_PASS (the address, then its password). */
+const SHORT_NAMES = ["retail", "info", "sme"];
+
+export function configuredInboxes(env: Record<string, string | undefined> = process.env): Inbox[] {
+  const listed = (env.MAIL_INBOXES ?? "")
     .split(",")
     .map((name) => name.trim().toLowerCase())
-    .filter(Boolean)
-    .map((name) => ({
-      name,
-      user: process.env[`MAIL_${name.toUpperCase()}_USER`]?.trim() ?? "",
-      pass: process.env[`MAIL_${name.toUpperCase()}_PASS`] ?? "",
-    }))
-    .filter((inbox) => inbox.user && inbox.pass);
+    .filter(Boolean);
+  return (listed.length ? listed : SHORT_NAMES)
+    .map((name) => {
+      const upper = name.toUpperCase();
+      return {
+        name,
+        user: (env[`MAIL_${upper}_USER`] ?? env[upper] ?? "").trim(),
+        pass: env[`MAIL_${upper}_PASS`] ?? env[`${upper}_PASS`] ?? "",
+      };
+    })
+    // Only a real address: a short variable that holds something else is not an inbox.
+    .filter((inbox) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(inbox.user) && inbox.pass);
 }
 
 const imapHost = () => process.env.MAIL_IMAP_HOST || "imap.secureserver.net";
