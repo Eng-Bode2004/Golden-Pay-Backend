@@ -24,6 +24,68 @@ const ONE_VISIT: [kind: CaseKind, type: string, plainTitle: RegExp][] = [
   ["finishing", "finishing", /^(استعلام |تقرير |نموذج )?(ال)?تشطيب( وحده)?$/],
 ];
 
+/** Whether a form of this type belongs in a slot (the general «ميداني» slot takes any business form). */
+export function slotFits(kind: CaseKind, formType: string | null): boolean {
+  if (!formType || kind === "business") return true;
+  return !KIND_FORM_TYPE[kind] || KIND_FORM_TYPE[kind] === formType;
+}
+
+export interface AuditForm {
+  template_id: string;
+  title: string;
+  investigation_type: string | null;
+  /** An approved version is active: new investigations (and the email) can use it. */
+  available: boolean;
+}
+
+const TYPE_NAME = new Map(INVESTIGATION_TYPES.map((type) => [type.code, type.name]));
+const typeName = (code: string | null | undefined) => (code ? (TYPE_NAME.get(code) ?? code) : "غير مصنف");
+
+/**
+ * What to look at in one client's forms and email links, in Arabic. Nothing is changed:
+ * a type that looks wrong is reported for head office to correct.
+ */
+export function auditClientForms(
+  forms: AuditForm[],
+  templates: Partial<Record<CaseKind, string>>,
+  twoVisits: boolean,
+): { problems: string[]; notes: string[] } {
+  const problems: string[] = [];
+  const notes: string[] = [];
+  const byId = new Map(forms.map((form) => [form.template_id, form]));
+  for (const form of forms) {
+    const fromTitle = INVESTIGATION_TYPES.find((type) => type.test.test(form.title))?.code ?? null;
+    if (!form.investigation_type) problems.push(`«${form.title}» غير مصنف`);
+    else if (fromTitle && fromTitle !== form.investigation_type) {
+      problems.push(`«${form.title}» مصنف «${typeName(form.investigation_type)}» والعنوان يقول «${typeName(fromTitle)}»`);
+    }
+    if (!form.available) problems.push(`«${form.title}» لا يوجد له إصدار معتمد مفعّل، فلا يصل إليه البريد`);
+  }
+  const available = forms.filter((form) => form.available);
+  for (const [code, name] of TYPE_NAME) {
+    const same = available.filter((form) => form.investigation_type === code);
+    if (same.length > 1) problems.push(`نموذجان أو أكثر من نوع «${name}»: ${same.map((form) => `«${form.title}»`).join(" و")}؛ اختر واحدًا في الإعدادات`);
+  }
+  for (const [kind, id] of Object.entries(templates) as [CaseKind, string][]) {
+    const form = byId.get(id);
+    if (!form) problems.push(`«${KIND_LABELS[kind]}» مربوط بنموذج غير موجود أو متوقف`);
+    else if (!form.available) problems.push(`«${KIND_LABELS[kind]}» مربوط بـ«${form.title}» بلا إصدار معتمد`);
+    else if (!slotFits(kind, form.investigation_type)) {
+      problems.push(`«${KIND_LABELS[kind]}» مربوط بـ«${form.title}» ونوعه «${typeName(form.investigation_type)}»`);
+    }
+  }
+  const linked = new Set(Object.values(templates));
+  for (const form of available) if (!linked.has(form.template_id)) problems.push(`«${form.title}» معتمد وغير مربوط بأي نوع طلب في البريد`);
+  // «سكن وعمل»: one form for both, or two investigations.
+  if (templates.home_work) notes.push("سكن وعمل: نموذج واحد واستعلام واحد");
+  else if (templates.home && templates.work) {
+    notes.push(twoVisits ? "سكن وعمل: استعلامان (سكن وعمل) يُرسلان معًا" : "سكن وعمل: استعلامان، وينتظران المراجعة حتى تُفعَّل «زيارتان»");
+  } else if (templates.home || templates.work) {
+    problems.push(`سكن وعمل: لا يوجد نموذج «${templates.home ? "عمل" : "سكن"}»، فتنتظر زيارته المراجعة`);
+  }
+  return { problems, notes };
+}
+
 /**
  * The form for each kind of request, only where there is no doubt which one it is. The others
  * are chosen by an administrator (in the settings or on the case).
@@ -120,9 +182,13 @@ export async function setupClients(
     )) as unknown as FormRow[];
     const [existing] = await query("SELECT domains, templates, inbox_kinds FROM mail_client_profiles WHERE client_id=$1", [client]);
     const active = new Set(forms.map((form) => form.template_id));
-    // A form an administrator already chose stays, as long as it is still active.
+    // A form already chosen stays while it is active and still of that slot's type: after head
+    // office corrects a form's type, its old link (QNB «تقرير عمل» as «تكويد شركات») goes.
+    const typeOf = new Map(forms.map((form) => [form.template_id, form.investigation_type ?? null]));
     const chosen = Object.fromEntries(
-      Object.entries((existing?.templates as Record<string, string> | undefined) ?? {}).filter(([, id]) => active.has(id)),
+      Object.entries((existing?.templates as Record<string, string> | undefined) ?? {}).filter(
+        ([kind, id]) => active.has(id) && slotFits(kind as CaseKind, typeOf.get(id) ?? null),
+      ),
     );
     const templates = { ...pickForms(forms), ...chosen };
     const merged = [...new Set([...((existing?.domains as string[] | undefined) ?? []), ...domains])];

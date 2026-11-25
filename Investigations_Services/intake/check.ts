@@ -4,6 +4,7 @@ import { WORKS_FOR_CLIENT_SQL } from "../../Shared/investigator-clients.ts";
 import { AI_MODEL, aiConfigured, readWithAi } from "./ai.ts";
 import { configuredInboxes, testInbox } from "./inbox.ts";
 import { loadProfiles, processMessage } from "./process.ts";
+import { auditClientForms, type AuditForm } from "./setup.ts";
 import { KIND_LABELS, type CaseKind } from "./rules.ts";
 
 /**
@@ -146,6 +147,20 @@ export async function runSystemCheck(deps: {
       const people = Number(staff?.n ?? 0);
       if (!people) problems.push("لا يوجد مستعلم يعمل لهذه الجهة، فلن يصل طلب لأحد");
       if (!profile.auto_send) problems.push("الإرسال التلقائي مغلق: كل طلب ينتظر المراجعة");
+      // Every form of the client: its type, whether the email can use it, and how it is linked.
+      const forms = (await query(
+        `SELECT t.template_id, t.title, t.investigation_type,
+           EXISTS (SELECT 1 FROM template_versions v WHERE v.version_id = t.active_version_id AND v.status = 'active') AS available
+         FROM form_templates t WHERE t.active AND t.client_id = $1 ORDER BY t.title`,
+        [profile.client_id],
+      )) as unknown as AuditForm[];
+      const audit = auditClientForms(forms, profile.templates, profile.two_visits);
+      add(
+        `forms:${profile.client_id}`,
+        `نماذج: ${profile.client_name}`,
+        audit.problems.length ? "warn" : "ok",
+        [...audit.problems, ...audit.notes].join("؛ ") || "كل النماذج مصنفة ومربوطة",
+      );
       const label = `جهة: ${profile.client_name}`;
       if (problems.length) add(`client:${profile.client_id}`, label, people ? "warn" : "fail", problems.join("، "));
       else add(`client:${profile.client_id}`, label, "ok", `تلقائي، ويعمل لها ${people} مستعلم`);

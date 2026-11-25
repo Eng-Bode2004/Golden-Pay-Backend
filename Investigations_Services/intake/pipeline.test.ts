@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { buildAddressIndex, findPlace } from "./address-place.ts";
 import { gatherFiles, type Attachment } from "./files.ts";
 import { aboutEarlierCases, cairoInstant, cleanText, kindOfRow, sendTime, sniffType, visitsFor } from "./rules.ts";
-import { pickForms } from "./setup.ts";
+import { auditClientForms, pickForms, slotFits } from "./setup.ts";
 import { csvGrid, isTrackerGrid } from "./tables.ts";
 
 // Invented data only: this repository is public.
@@ -158,5 +158,50 @@ describe("files", () => {
   test("text PostgreSQL accepts", () => {
     expect(cleanText("a\u0000b")).toBe("ab");
     expect(cleanText("x\ud83d")).toBe("x�");
+  });
+});
+
+describe("auditing a client's forms and email links", () => {
+  const qnb = (workType: string) => [
+    { template_id: "w", title: "تقرير عمل", investigation_type: workType, available: true },
+    { template_id: "h", title: "تقرير سكن", investigation_type: "residence", available: true },
+    { template_id: "s", title: "استعلام عن الشركات الصغيرة والمتوسطة", investigation_type: "sme", available: true },
+    { template_id: "o", title: "استعلام اصحاب الاعمال", investigation_type: "business_owner", available: true },
+  ];
+
+  test("QNB's work form filed as «تكويد شركات» is reported, with its wrong link and the missing «عمل»", () => {
+    const linked = { home: "h", sme: "s", business_owner: "o", company_coding: "w", business: "s" };
+    const { problems } = auditClientForms(qnb("company_coding"), linked, false);
+    expect(problems).toContain("«تقرير عمل» مصنف «تكويد شركات وكيانات» والعنوان يقول «عمل»");
+    expect(problems.some((p) => p.startsWith("سكن وعمل: لا يوجد نموذج «عمل»"))).toBe(true);
+    // Once corrected, the old link no longer fits its slot and a new upload drops it.
+    expect(slotFits("company_coding", "employment")).toBe(false);
+    expect(slotFits("work", "employment")).toBe(true);
+    expect(slotFits("business", "sme")).toBe(true);
+  });
+
+  test("after the correction QNB is clean and «سكن وعمل» is two investigations", () => {
+    const fixed = pickForms(qnb("employment"));
+    expect(fixed).toEqual({ home: "h", work: "w", sme: "s", business_owner: "o", business: "s" });
+    const { problems, notes } = auditClientForms(qnb("employment"), fixed, true);
+    expect(problems).toEqual([]);
+    expect(notes).toEqual(["سكن وعمل: استعلامان (سكن وعمل) يُرسلان معًا"]);
+  });
+
+  test("unavailable, duplicate and unlinked forms are reported, never changed", () => {
+    const forms = [
+      { template_id: "a", title: "استعلام العمل", investigation_type: "employment", available: true },
+      { template_id: "b", title: "استعلام موظف", investigation_type: "employment", available: true },
+      { template_id: "c", title: "استعلام سكن", investigation_type: "residence", available: false },
+    ];
+    const { problems } = auditClientForms(forms, { work: "a" }, false);
+    expect(problems).toContain("«استعلام سكن» لا يوجد له إصدار معتمد مفعّل، فلا يصل إليه البريد");
+    expect(problems.some((p) => p.startsWith("نموذجان أو أكثر من نوع «عمل»"))).toBe(true);
+    expect(problems).toContain("«استعلام موظف» معتمد وغير مربوط بأي نوع طلب في البريد");
+  });
+
+  test("a combined home-and-work form is one investigation", () => {
+    const forms = [{ template_id: "x", title: "استعلام منزل و عمل", investigation_type: "residence_employment", available: true }];
+    expect(auditClientForms(forms, { home_work: "x" }, false).notes).toEqual(["سكن وعمل: نموذج واحد واستعلام واحد"]);
   });
 });
