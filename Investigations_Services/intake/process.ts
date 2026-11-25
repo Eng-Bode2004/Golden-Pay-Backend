@@ -13,6 +13,8 @@ import {
   APPOINTMENT_NEEDED,
   detectFast,
   detectKnowledge,
+  formFor,
+  isBusinessKind,
   domainMatches,
   findNationalId,
   freshBody,
@@ -52,12 +54,14 @@ export interface Profile {
   auto_send: boolean;
   two_visits: boolean;
   ignore_words: string[];
+  /** The type when the email says none, by inbox. */
+  inbox_kinds: Record<string, CaseKind>;
 }
 
 export async function loadProfiles(): Promise<Profile[]> {
   return (await query(
     `SELECT p.client_id, c.name AS client_name, p.domains, p.templates, p.fast_words, p.normal_level, p.fast_level,
-       p.auto_send, p.two_visits, p.ignore_words
+       p.auto_send, p.two_visits, p.ignore_words, p.inbox_kinds
      FROM mail_client_profiles p JOIN form_clients c ON c.client_id = p.client_id WHERE p.active`,
   )) as unknown as Profile[];
 }
@@ -106,6 +110,12 @@ const htmlToText = (value: string) =>
 export async function placeOfAddress(address: string): Promise<{ governorate: string | null; district: string | null }> {
   const found = findPlace(address, (await placeIndex()).index);
   return { governorate: found.governorate ?? null, district: found.district ?? null };
+}
+
+/** The client's type for requests to this inbox that name none. */
+export function inboxKind(profile: Pick<Profile, "inbox_kinds">, inbox: string | null): CaseKind | null {
+  const kind = inbox ? profile.inbox_kinds?.[inbox] : undefined;
+  return kind && kind in KIND_LABELS ? kind : null;
 }
 
 export interface ProcessOutcome {
@@ -291,7 +301,8 @@ ${bodyText}`);
   let ready = 0;
   for (const item of cases) {
     const fromTable = item.source !== "ai";
-    const stated = item.kind ?? emailKind;
+    // The email's words, else the client's rule for this inbox (QNB's SME inbox: the SME form).
+    const stated = item.kind ?? emailKind ?? inboxKind(profile, message.inbox as string | null);
     const asked = stated ?? (fromTable ? kindOfRow(item) : null);
     const visits = visitsFor(asked, profile.templates);
     for (const kind of visits) {
@@ -321,13 +332,17 @@ ${bodyText}`);
       }
       if (!fromTable && !(item.confidence >= AUTO_CONFIDENCE)) reasons.push("القراءة غير مؤكدة");
       if (!fields.subject_name) reasons.push("لا يوجد اسم");
-      else if (kind !== "business" && fields.subject_name.trim().split(/\s+/).length < 2) reasons.push("الاسم غير كامل");
+      else if (!isBusinessKind(kind) && fields.subject_name.trim().split(/\s+/).length < 2) reasons.push("الاسم غير كامل");
       if (!fields.address) reasons.push(split && kind === "work" ? "لا يوجد عنوان عمل" : "لا يوجد عنوان");
       else if (fields.address.length < 8) reasons.push("العنوان غير كافٍ");
       if (fields.national_id && !isNationalId(fields.national_id)) reasons.push("الرقم القومي غير صحيح");
       if (!fields.governorate) reasons.push("المحافظة غير معروفة");
       if (!kind) reasons.push("نوع الاستعلام غير محدد");
-      else if (!profile.templates[kind]) reasons.push(`لا يوجد نموذج «${KIND_LABELS[kind]}» لهذه الجهة`);
+      else {
+        const form = formFor(profile.templates, kind);
+        if (!form) reasons.push(`لا يوجد نموذج «${KIND_LABELS[kind]}» لهذه الجهة`);
+        else if (form.fallback) reasons.push(`لا يوجد نموذج «${KIND_LABELS[kind]}» لهذه الجهة: سيُستخدم نموذج «${KIND_LABELS.business}»، تأكد منه`);
+      }
       // The customer expects the visit: an administrator calls them and sets the time first.
       if (emailKnowledge === "with") reasons.push(APPOINTMENT_NEEDED);
 
@@ -372,7 +387,7 @@ type CaseFields = Awaited<ReturnType<typeof placed>>["fields"];
 
 /** The fields an investigation needs, with the place taken from the address being visited. */
 async function placed(item: ExtractedCase, kind: CaseKind | null, split: boolean) {
-  const atWork = kind === "work" || kind === "business";
+  const atWork = kind === "work" || isBusinessKind(kind);
   // A single «Address» column is the place to visit, whatever the kind; in a split each visit
   // has only its own address (an investigator is never sent home to ask about a job).
   const visit = split

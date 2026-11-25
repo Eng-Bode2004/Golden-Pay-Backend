@@ -4,6 +4,7 @@ import {
   detectFast,
   detectKind,
   detectKnowledge,
+  formFor,
   domainMatches,
   findNationalId,
   freshBody,
@@ -222,8 +223,8 @@ describe("customer knowledge and merchant visits", () => {
   });
 
   test("«استعلام تجار» is a merchant visit; the commercial register is not", () => {
-    expect(detectKind("استعلام تجار")).toBe("business");
-    expect(detectKind("ex merchant")).toBe("business");
+    expect(detectKind("استعلام تجار")).toBe("merchant_coding");
+    expect(detectKind("ex merchant")).toBe("merchant_coding");
     expect(detectKind("مرفق السجل التجاري والبطاقة الضريبية")).toBeNull();
   });
 });
@@ -239,8 +240,45 @@ describe("Mogo merchant sheet («استعلام تجار»)", () => {
     ];
     const [item] = casesFromGrid(rows);
     expect(item?.subject_name).toBe("معرض النور للسيارات");
-    expect(item?.kind).toBe("business");
+    expect(item?.kind).toBe("merchant_coding");
     expect(item?.home_address).toContain("شارع التحرير");
     expect(item?.phone).toBe("01001234567");
+  });
+});
+
+describe("each business visit by its own type", () => {
+  test("the words banks use pick the exact form", () => {
+    expect(detectKind("استعلام اصحاب الاعمال")).toBe("business_owner");
+    expect(detectKind("استعلام صاحب نشاط - مقر النشاط")).toBe("business_owner");
+    expect(detectKind("استعلام عن الشركات الصغيرة والمتوسطة")).toBe("sme");
+    expect(detectKind("SME visit")).toBe("sme");
+    expect(detectKind("استعلام ميداني عن الشركة")).toBe("company");
+    expect(detectKind("استعلام موردين")).toBe("supplier");
+    expect(detectKind("زيارة مفاجئة للمقر")).toBe("site_visit");
+    expect(detectKind("استعلام عيادة")).toBe("clinic");
+    expect(detectKind("استعلام عن المعرض المرفق")).toBe("dealer_coding");
+    expect(detectKind("تكويد معرض سيارات")).toBe("dealer_coding");
+    expect(detectKind("تكويد كيان اعتباري")).toBe("company_coding");
+    expect(detectKind("استعلام متابعة")).toBe("follow_up");
+  });
+
+  test("words in every email never decide the type", () => {
+    // «assessment» holds «sme»; «شركة الاستعلام» is us; «Company Name» is a form label.
+    expect(detectKind("Credit Card Assessment Center")).toBeNull();
+    expect(detectKind("السادة / شركة الاستعلام تحية طيبة")).toBeNull();
+    expect(detectKind("Name: x\nCompany Name: y")).toBeNull();
+    expect(detectKind("السادة / شركة الاستعلام برجاء استعلام سكن")).toBe("home");
+    expect(detectKind("برجاء المتابعة مع العميل استعلام عمل")).toBe("work");
+  });
+});
+
+describe("the form for a kind", () => {
+  test("its own form, else the client's general field-visit form (waiting for review)", () => {
+    const templates = { home: "h", sme: "s", business: "s" };
+    expect(formFor(templates, "home")).toEqual({ templateId: "h", fallback: false });
+    expect(formFor(templates, "sme")).toEqual({ templateId: "s", fallback: false });
+    expect(formFor(templates, "supplier")).toEqual({ templateId: "s", fallback: true });
+    expect(formFor(templates, "work")).toBeNull();
+    expect(formFor({ home: "h" }, "supplier")).toBeNull();
   });
 });

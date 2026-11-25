@@ -101,7 +101,8 @@ describe("what to visit", () => {
       { template_id: "c", title: "استعلام شركات", investigation_type: "company" },
       { template_id: "s", title: "تقرير مشروعات", investigation_type: "sme" },
     ];
-    expect(pickForms(forms)).toEqual({ home: "h", work: "w" });
+    // Two employment forms: «عمل» takes the plain one. Company and SME each fill their own slot.
+    expect(pickForms(forms)).toEqual({ home: "h", work: "w", company: "c", sme: "s" });
   });
 
   test("Mogo's «استعلام تجار» is its merchant visit; a company form still comes first elsewhere", () => {
@@ -110,12 +111,12 @@ describe("what to visit", () => {
       { template_id: "w", title: "استعلام عمل", investigation_type: null },
       { template_id: "m", title: "استعلام تجار", investigation_type: null },
     ];
-    expect(pickForms(mogo)).toEqual({ home: "h", work: "w", business: "m" });
+    expect(pickForms(mogo)).toEqual({ home: "h", work: "w", merchant_coding: "m", business: "m" });
     const bank = [
       { template_id: "c", title: "استعلام شركات", investigation_type: "company" },
       { template_id: "o", title: "استعلام أصحاب الاعمال", investigation_type: "business_owner" },
     ];
-    expect(pickForms(bank)).toEqual({ business: "c" });
+    expect(pickForms(bank)).toEqual({ company: "c", business_owner: "o", business: "c" });
   });
 });
 

@@ -449,3 +449,6 @@ ALTER TABLE mail_cases ADD COLUMN IF NOT EXISTS appointment_at timestamptz;
 ALTER TABLE investigations ADD COLUMN IF NOT EXISTS customer_knowledge text;
 -- A visit at an agreed time: the deadline counts from it, whatever the case's type and price.
 ALTER TABLE investigations ADD COLUMN IF NOT EXISTS appointment_at timestamptz;
+
+-- The request type when an email says none, by the inbox it came to ({"sme": "sme"}).
+ALTER TABLE mail_client_profiles ADD COLUMN IF NOT EXISTS inbox_kinds jsonb NOT NULL DEFAULT '{}';

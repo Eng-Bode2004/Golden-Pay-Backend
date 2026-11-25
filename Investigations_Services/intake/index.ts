@@ -14,6 +14,7 @@ import { setupClients } from "./setup.ts";
 import {
   APPOINTMENT_NEEDED,
   domainMatches,
+  formFor,
   findNationalId,
   KIND_LABELS,
   KNOWLEDGE_LABELS,
@@ -68,7 +69,7 @@ async function release(caseId: string, deps: IntakeDeps): Promise<{ ok: boolean;
     if (await alreadyCreated()) return { ok: true };
     const profile = (await loadProfiles()).find((p) => p.client_id === item.client_id);
     if (!profile) throw new Error("لم تعد هذه الجهة مضبوطة لاستقبال البريد");
-    const templateId = (item.template_id as string | null) ?? profile.templates[item.kind as CaseKind];
+    const templateId = (item.template_id as string | null) ?? formFor(profile.templates, item.kind as CaseKind)?.templateId;
     if (!templateId) throw new Error(`لا يوجد نموذج «${KIND_LABELS[item.kind as CaseKind] ?? item.kind}» لهذه الجهة`);
     const template = await deps.activeTemplate(templateId);
     const f = item.fields as Row;
@@ -243,7 +244,7 @@ async function blockers(item: Row): Promise<string[]> {
   if (!profile) out.push("الجهة غير مضبوطة");
   else if (item.template_id) return out;
   else if (!item.kind) out.push("نوع الاستعلام غير محدد");
-  else if (!profile.templates[item.kind as CaseKind]) out.push(`لا يوجد نموذج «${KIND_LABELS[item.kind as CaseKind]}» لهذه الجهة`);
+  else if (!formFor(profile.templates, item.kind as CaseKind)) out.push(`لا يوجد نموذج «${KIND_LABELS[item.kind as CaseKind]}» لهذه الجهة`);
   return out;
 }
 
@@ -598,7 +599,7 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
     withPermission(MANAGE, async (context, auth) => {
       const body = await readJson(context.req).catch(() => ({}) as Row);
       const kind = body.kind as CaseKind;
-      if (!["home", "work", "business"].includes(kind)) throw ApiError.badRequest("Choose home, work or business", { field: "kind" });
+      if (!KINDS.includes(kind) || kind === "home_work") throw ApiError.badRequest("Choose one visit's type", { field: "kind" });
       const [item] = await query("SELECT * FROM mail_cases WHERE case_id=$1", [context.params.case_id]);
       if (!item) throw ApiError.notFound("Case not found");
       if (item.status === "rejected") throw new ApiError(409, "INVALID_STATUS_TRANSITION", "هذه الحالة مرفوضة");
@@ -705,6 +706,10 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
         await assertClientForm(id, clientId);
         templates[kind] = id;
       }
+      const inboxKinds: Row = {};
+      for (const [inbox, kind] of Object.entries((body.inbox_kinds ?? {}) as Row)) {
+        if (/^[a-z0-9_-]{1,20}$/.test(inbox) && KINDS.includes(kind as CaseKind)) inboxKinds[inbox] = kind;
+      }
       const level = async (code: unknown, fallback: string) => {
         const value = optionalText(code, 40) ?? fallback;
         const [found] = await query("SELECT 1 FROM service_levels WHERE code=$1", [value]);
@@ -713,10 +718,11 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
       };
       await query(
         `INSERT INTO mail_client_profiles(client_id, domains, templates, fast_words, normal_level, fast_level, auto_send,
-           ignore_words, notes, active, updated_by, two_visits, updated_at)
-         VALUES($1,$2,$3::text::jsonb,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
+           ignore_words, notes, active, updated_by, two_visits, inbox_kinds, updated_at)
+         VALUES($1,$2,$3::text::jsonb,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::text::jsonb,now())
          ON CONFLICT (client_id) DO UPDATE SET domains=$2, templates=$3::text::jsonb, fast_words=$4, normal_level=$5,
-           fast_level=$6, auto_send=$7, ignore_words=$8, notes=$9, active=$10, updated_by=$11, two_visits=$12, updated_at=now()`,
+           fast_level=$6, auto_send=$7, ignore_words=$8, notes=$9, active=$10, updated_by=$11, two_visits=$12,
+           inbox_kinds=$13::text::jsonb, updated_at=now()`,
         [
           clientId,
           domains,
@@ -730,6 +736,7 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
           body.active !== false,
           auth.user.user_id,
           body.two_visits === true,
+          JSON.stringify(inboxKinds),
         ],
       );
       // Emails from these domains that waited as «unknown sender» are read now.

@@ -1,7 +1,7 @@
 import { query } from "../../IdentityAcess_Services/Config/db.ts";
 import { ApiError } from "../../IdentityAcess_Services/Utils/http.ts";
 import { INVESTIGATION_TYPES } from "../../Shared/templates/inventory.ts";
-import { normalizeText, type CaseKind } from "./rules.ts";
+import { isBusinessKind, KIND_FORM_TYPE, KIND_LABELS, normalizeText, type CaseKind } from "./rules.ts";
 
 /**
  * Linking every client in one step: an administrator uploads the private list of which
@@ -39,6 +39,12 @@ export function pickForms(forms: FormRow[]): Partial<Record<CaseKind, string>> {
     const plain = options.filter((form) => plainTitle.test(normalizeText(form.title)));
     const choice = options.length === 1 ? options[0] : plain.length === 1 ? plain[0] : undefined;
     if (choice) picked[kind] = choice.template_id;
+  }
+  // Each business visit gets the client's one form of that type (two of a type: chosen by hand).
+  for (const kind of Object.keys(KIND_LABELS) as CaseKind[]) {
+    if (!isBusinessKind(kind) || !KIND_FORM_TYPE[kind]) continue;
+    const options = typed.filter((form) => form.type === KIND_FORM_TYPE[kind]);
+    if (options.length === 1) picked[kind] = options[0]!.template_id;
   }
   const business = typed.filter((form) => ["company", "sme", "site_visit"].includes(form.type ?? ""));
   // A client with no company form but one merchant form («استعلام تجار» is filed as «تكويد تاجر»).
@@ -78,6 +84,12 @@ export async function setupClients(
           .filter((domain) => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain) && !/^(com|co|org|net|gov|edu)\.[a-z]{2}$/.test(domain)),
       ),
     ].slice(0, 40);
+    // The type for requests to an inbox that name none, e.g. {"sme": "sme"}.
+    const inboxKinds = Object.fromEntries(
+      Object.entries((entry?.inbox_kinds as Row | undefined) ?? {})
+        .map(([inbox, kind]): [string, string] => [inbox.trim().toLowerCase(), String(kind)])
+        .filter(([inbox, kind]) => /^[a-z0-9_-]{1,20}$/.test(inbox) && kind in KIND_LABELS),
+    );
     const result: SetupResult = { client, name: null, linked: false, domains, kinds: [], problem: null };
     results.push(result);
 
@@ -106,7 +118,7 @@ export async function setupClients(
        WHERE t.active AND t.client_id = $1 ORDER BY t.title`,
       [client],
     )) as unknown as FormRow[];
-    const [existing] = await query("SELECT domains, templates FROM mail_client_profiles WHERE client_id=$1", [client]);
+    const [existing] = await query("SELECT domains, templates, inbox_kinds FROM mail_client_profiles WHERE client_id=$1", [client]);
     const active = new Set(forms.map((form) => form.template_id));
     // A form an administrator already chose stays, as long as it is still active.
     const chosen = Object.fromEntries(
@@ -115,11 +127,19 @@ export async function setupClients(
     const templates = { ...pickForms(forms), ...chosen };
     const merged = [...new Set([...((existing?.domains as string[] | undefined) ?? []), ...domains])];
     await query(
-      `INSERT INTO mail_client_profiles(client_id, domains, templates, auto_send, two_visits, active, updated_by, updated_at)
-       VALUES($1,$2,$3::text::jsonb,$4,$5,true,$6,now())
+      `INSERT INTO mail_client_profiles(client_id, domains, templates, auto_send, two_visits, active, updated_by, inbox_kinds, updated_at)
+       VALUES($1,$2,$3::text::jsonb,$4,$5,true,$6,$7::text::jsonb,now())
        ON CONFLICT (client_id) DO UPDATE SET domains=$2, templates=$3::text::jsonb, auto_send=$4, two_visits=$5, active=true,
-         updated_by=$6, updated_at=now()`,
-      [client, merged, JSON.stringify(templates), autoSend, twoVisits, actorId],
+         updated_by=$6, inbox_kinds=$7::text::jsonb, updated_at=now()`,
+      [
+        client,
+        merged,
+        JSON.stringify(templates),
+        autoSend,
+        twoVisits,
+        actorId,
+        JSON.stringify({ ...((existing?.inbox_kinds as Row | undefined) ?? {}), ...inboxKinds }),
+      ],
     );
     result.linked = true;
     result.domains = merged;

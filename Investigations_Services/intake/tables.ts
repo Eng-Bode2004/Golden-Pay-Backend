@@ -201,7 +201,7 @@ function fromLabelColumn(rows: string[][]): ExtractedCase[] | null {
   if (merchant) {
     item.company ??= merchant;
     item.subject_name ??= merchant;
-    item.kind ??= "business";
+    item.kind ??= "merchant_coding";
   }
   return found >= 3 && item.subject_name ? [finish(item, [])] : null;
 }

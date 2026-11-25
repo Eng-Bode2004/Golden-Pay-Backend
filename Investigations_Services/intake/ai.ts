@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { CaseKind } from "./rules.ts";
+import { KIND_LABELS, type CaseKind } from "./rules.ts";
 
 /**
  * Reads what free parsing cannot: photos of handwritten application forms, scanned PDFs,
@@ -82,7 +82,7 @@ const SCHEMA = {
           governorate: nullableString,
           district: nullableString,
           // An enum beside a list of types is rejected; this is the form the API documents.
-          kind: { anyOf: [{ type: "string", enum: ["home", "work", "home_work", "business", "finishing"] }, { type: "null" }] },
+          kind: { anyOf: [{ type: "string", enum: Object.keys(KIND_LABELS) }, { type: "null" }] },
           fast: { type: "boolean" },
           client_reference: nullableString,
           notes: nullableString,
@@ -102,7 +102,7 @@ Each case is one person (or one business) to visit. Fill the fields exactly as w
 - phone: the applicant's mobile.
 - home_address / work_address: the full addresses to visit, as written.
 - governorate and district: the Egyptian governorate (محافظة) and district/city (مركز / حي / مدينة) of the address to visit. Infer them from the address when they are not written separately (e.g. «مدينة نصر» → القاهرة / مدينة نصر); null if the address does not say.
-- kind: home (سكن), work (عمل), home_work (سكن وعمل), business (field visit to a company, factory, shop or supplier), finishing (تشطيب وحدة); null if the email does not say.
+- kind: what is asked, only when the email says it: home (سكن), work (عمل), home_work (سكن وعمل), finishing (تشطيب وحدة), business_owner (صاحب نشاط / أصحاب الأعمال / مهن حرة), sme (شركات صغيرة ومتوسطة / مشروعات), company (استعلام عن شركة), supplier (موردين / وكلاء), site_visit (زيارة مفاجئة / زيارة المقر), clinic (عيادة / صيدلية), dealer_coding (تكويد معرض / معرض سيارات), merchant_coding (تكويد تاجر / تجار), company_coding (تكويد شركات / كيان اعتباري), follow_up (متابعة), business (a field visit to a business that the email names no more exactly); null if the email does not say.
 - fast: true only if the request is marked urgent (Fast Track, عاجل, استعجال, سريع, urgent).
 - client_reference: the client's own reference (application number, CID, code), if any.
 - notes: anything the investigator needs (landmark, best time, partner, instructions such as «اجراء الاستعلام دون انتظار رد العميل»).

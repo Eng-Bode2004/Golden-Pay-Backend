@@ -3,14 +3,67 @@
  * No database or network here, so every rule is unit-tested (rules.test.ts).
  */
 
-export type CaseKind = "home" | "work" | "home_work" | "business" | "finishing";
-
-export const KIND_LABELS: Record<CaseKind, string> = {
+/**
+ * What a request asks for. Each one is a slot for one of the client's forms; the business
+ * ones use the same codes as the forms' investigation types, so a form fills its slot by
+ * its own type. «business» is a field visit the email names no more exactly.
+ */
+export const KIND_LABELS = {
   home: "سكن",
   work: "عمل",
   home_work: "سكن وعمل",
-  business: "ميداني / منشأة / تجار",
   finishing: "تشطيب وحدة",
+  business_owner: "صاحب نشاط / أصحاب الأعمال",
+  sme: "شركات صغيرة ومتوسطة",
+  company: "شركات",
+  supplier: "موردين ووكلاء",
+  site_visit: "زيارة ميدانية / مفاجئة",
+  clinic: "عيادات وصيدليات",
+  dealer_coding: "تكويد معرض",
+  merchant_coding: "تكويد تاجر / تجار",
+  company_coding: "تكويد شركات وكيانات",
+  follow_up: "متابعة",
+  business: "ميداني (غير محدد)",
+} as const;
+
+export type CaseKind = keyof typeof KIND_LABELS;
+
+/** A visit to a business rather than a person's home or job: the name may be one word. */
+export function isBusinessKind(kind: CaseKind | null): boolean {
+  return Boolean(kind) && !["home", "work", "home_work", "finishing"].includes(kind!);
+}
+
+/**
+ * The client's form for a kind. A business visit the client has no form for uses its general
+ * field-visit form («ميداني»): QNB's SME visits to suppliers go on its SME form. `fallback`
+ * says so, and such a case always waits for a person.
+ */
+export function formFor(
+  templates: Partial<Record<CaseKind, string>>,
+  kind: CaseKind | null,
+): { templateId: string; fallback: boolean } | null {
+  if (!kind) return null;
+  if (templates[kind]) return { templateId: templates[kind]!, fallback: false };
+  if (isBusinessKind(kind) && templates.business) return { templateId: templates.business, fallback: true };
+  return null;
+}
+
+/** The investigation type of the forms that fill each slot (as Shared/templates/inventory.ts). */
+export const KIND_FORM_TYPE: Partial<Record<CaseKind, string>> = {
+  home: "residence",
+  work: "employment",
+  home_work: "residence_employment",
+  finishing: "finishing",
+  business_owner: "business_owner",
+  sme: "sme",
+  company: "company",
+  supplier: "supplier",
+  site_visit: "site_visit",
+  clinic: "clinic",
+  dealer_coding: "dealer_coding",
+  merchant_coding: "merchant_coding",
+  company_coding: "company_coding",
+  follow_up: "follow_up",
 };
 
 const TIME_ZONE = "Africa/Cairo";
@@ -108,7 +161,23 @@ export function normalizeMobile(value: string): string | null {
 
 /** Words in every email whatever is asked: form labels and job titles in signatures. */
 const NOT_THE_REQUEST =
-  /home address|company address|business address|work address|head office|field investigation (officer|unit|department)|عنوان (ال)?(سكن|عمل|منزل)|(عنوان |اسم )?جهه (ال)?عمل/g;
+  /home address|company address|company name|business address|work address|head office|field investigation (officer|unit|department)|عنوان (ال)?(سكن|عمل|منزل)|(عنوان |اسم )?جهه (ال)?عمل|شركه (ال)?استعلام(ات)?|شركه جولدن باي/g;
+
+/** The business visits, most specific first: the first that the email names decides. */
+const BUSINESS_WORDS: [CaseKind, string][] = [
+  ["follow_up", "(استعلام|زياره) (ال)?متابعه|follow.?up visit"],
+  ["clinic", "(ال)?عياده|(ال)?عيادات|(ال)?صيدليه|(ال)?صيدليات|clinics?|pharmac(y|ies)"],
+  ["dealer_coding", "تكويد (ال)?معرض|معرض (ال)?سيارات|معارض (ال)?سيارات|(ال)?معرض|showrooms?|car dealers?|dealers?"],
+  ["company_coding", "تكويد (ال)?(شركه|شركات|كيان|كيانات)|(ال)?كيان (ال)?اعتباري"],
+  // «استعلام تجار» (Mogo); «تجاري» in «السجل التجاري» is another word.
+  ["merchant_coding", "تكويد (ال)?(تاجر|تجار)|(ال)?تجار|تاجر|merchants?"],
+  ["supplier", "(ال)?موردين|(ال)?مورد|(ال)?وكلاء|suppliers?|vendors?"],
+  ["site_visit", "زياره مفاجئه|(ال)?زياره (ال)?مفاجئه|زياره (المقر|جميع المقرات)|site visit|surprise visit"],
+  ["sme", "sme|(ال)?مشروعات|(ال)?مشروعات (ال)?صغيره|(ال)?صغيره و ?(ال)?متوسطه|small (and|&) medium"],
+  ["business_owner", "(ال)?اصحاب (ال)?اعمال|صاحب (ال)?(نشاط|عمل حر)|مقر (ال)?نشاط|مهن حره|(ال)?مهن (ال)?حره|business owners?|self.?employed"],
+  ["company", "استعلام (ميداني )?(عن )?(ال)?(شركه|شركات)|corporate"],
+  ["business", "(ال)?ميداني|(ال)?ميدانيه|(ال)?منشاه|(ال)?مصنع|field visit"],
+];
 
 /**
  * What is being asked for, from the words the client uses. Null when nothing says: the case
@@ -119,10 +188,7 @@ export function detectKind(text: string): CaseKind | null {
   const word = (pattern: string) => new RegExp(`(^|[^\\p{L}])(${pattern})($|[^\\p{L}])`, "u").test(t);
   if (word("(ال)?تشطيب")) return "finishing";
   if (/سكن\s*و\s*(ال)?عمل|home\s*(and|&)\s*work|work\s*(and|&)\s*home/.test(t)) return "home_work";
-  // «استعلام تجار» (Mogo's merchant visit); «تجاري» in «السجل التجاري» is another word.
-  if (word("(ال)?ميداني|(ال)?ميدانيه|(ال)?منشاه|(ال)?مصنع|موردين|(ال)?تجار|تاجر|merchants?|field visit|زياره (المقر|جميع المقرات)")) {
-    return "business";
-  }
+  for (const [kind, words] of BUSINESS_WORDS) if (word(words)) return kind;
   const home = word("(ال)?سكن|(ال)?منزل|محل الاقامه|home|residence");
   const work = word("(ال)?عمل|work");
   if (home && work) return "home_work";
