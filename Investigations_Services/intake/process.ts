@@ -102,6 +102,12 @@ const htmlToText = (value: string) =>
     .replace(/[ \t]+/g, " ")
     .replace(/\n\s*\n+/g, "\n");
 
+/** The governorate and district an address names, for a visit an administrator adds. */
+export async function placeOfAddress(address: string): Promise<{ governorate: string | null; district: string | null }> {
+  const found = findPlace(address, (await placeIndex()).index);
+  return { governorate: found.governorate ?? null, district: found.district ?? null };
+}
+
 export interface ProcessOutcome {
   status: string;
   reason: string | null;

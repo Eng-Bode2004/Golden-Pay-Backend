@@ -9,7 +9,7 @@ import { optionalText, requiredText } from "../../Shared/service.ts";
 import { aiConfigured, AI_MODEL } from "./ai.ts";
 import { runSystemCheck } from "./check.ts";
 import { configuredInboxes, pollAll, refetchMessage, sendFromInbox } from "./inbox.ts";
-import { loadProfiles, processMessage } from "./process.ts";
+import { loadProfiles, placeOfAddress, processMessage } from "./process.ts";
 import { setupClients } from "./setup.ts";
 import {
   APPOINTMENT_NEEDED,
@@ -557,6 +557,60 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
         [context.params.case_id],
       );
       return ok({ ...after, sent: result.ok && after?.status === "sent" });
+    }),
+  );
+
+  /**
+   * One email asks for two visits to the same person (work and home) but was read as one:
+   * a copy for the other visit, with that visit's address when the email gave it.
+   */
+  router.post(
+    "/investigations/intake/cases/:case_id/visit",
+    withPermission(MANAGE, async (context, auth) => {
+      const body = await readJson(context.req).catch(() => ({}) as Row);
+      const kind = body.kind as CaseKind;
+      if (!["home", "work", "business"].includes(kind)) throw ApiError.badRequest("Choose home, work or business", { field: "kind" });
+      const [item] = await query("SELECT * FROM mail_cases WHERE case_id=$1", [context.params.case_id]);
+      if (!item) throw ApiError.notFound("Case not found");
+      if (item.status === "rejected") throw new ApiError(409, "INVALID_STATUS_TRANSITION", "هذه الحالة مرفوضة");
+      const [same] = await query(
+        "SELECT 1 FROM mail_cases WHERE message_id=$1 AND kind=$2 AND status <> 'rejected' AND fields->>'subject_name' IS NOT DISTINCT FROM $3",
+        [item.message_id, kind, (item.fields as Row).subject_name ?? null],
+      );
+      if (same) throw new ApiError(409, "ALREADY_EXISTS", `توجد زيارة «${KIND_LABELS[kind]}» لهذا الشخص في هذا البريد`);
+      const f = { ...(item.fields as Row) };
+      const own = (kind === "home" ? f.home_address : f.work_address) as string | null | undefined;
+      if (own && own !== f.address) {
+        f.address = own;
+        Object.assign(f, await placeOfAddress(own));
+      }
+      const [copy] = await query(
+        `INSERT INTO mail_cases(message_id, client_id, kind, fast, fields, confidence, doubts, source, status, reason, release_at,
+           knowledge, appointment_at, reviewed_by)
+         VALUES($1,$2,$3,$4,$5::text::jsonb,$6,$7,'manual','review',$8,$9,$10,$11,$12) RETURNING case_id`,
+        [
+          item.message_id,
+          item.client_id,
+          kind,
+          item.fast,
+          JSON.stringify(f),
+          item.confidence,
+          item.doubts ?? [],
+          own ? "زيارة ثانية أضافها مسؤول: راجع البيانات" : "زيارة ثانية أضافها مسؤول: اكتب عنوان هذه الزيارة",
+          item.release_at,
+          item.knowledge ?? null,
+          item.appointment_at ?? null,
+          auth.user.user_id,
+        ],
+      );
+      await recordAudit({
+        event: "mail.case_visit_added",
+        actorId: auth.user.user_id,
+        success: true,
+        context,
+        metadata: { mail_case: copy?.case_id, copied_from: context.params.case_id, added_visit: kind },
+      });
+      return ok({ case_id: copy?.case_id });
     }),
   );
 
