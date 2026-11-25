@@ -362,10 +362,11 @@ export function kindOfRow(row: {
 
 /**
  * «سكن وعمل» is two visits with two reports when the client has no single form for both
- * (each bank form is one visit), so it becomes one case for each.
+ * (each bank form is one visit), so it becomes one case for each. Both are made even when
+ * one of the two forms is missing: that case then waits and says so, and neither visit is lost.
  */
 export function visitsFor(kind: CaseKind | null, templates: Partial<Record<CaseKind, string>>): (CaseKind | null)[] {
-  if (kind === "home_work" && !templates.home_work && templates.home && templates.work) return ["home", "work"];
+  if (kind === "home_work" && !templates.home_work) return ["home", "work"];
   return [kind];
 }
 

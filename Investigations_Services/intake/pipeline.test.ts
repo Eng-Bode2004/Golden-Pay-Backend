@@ -84,7 +84,8 @@ describe("what to visit", () => {
   test("home and work split only without a combined form", () => {
     expect(visitsFor("home_work", { home: "h", work: "w" })).toEqual(["home", "work"]);
     expect(visitsFor("home_work", { home: "h", work: "w", home_work: "b" })).toEqual(["home_work"]);
-    expect(visitsFor("home_work", { home: "h" })).toEqual(["home_work"]);
+    // No «عمل» form linked yet: still two cases; the work one waits with «لا يوجد نموذج».
+    expect(visitsFor("home_work", { home: "h" })).toEqual(["home", "work"]);
   });
 
   test("a row without a type column suggests one", () => {
