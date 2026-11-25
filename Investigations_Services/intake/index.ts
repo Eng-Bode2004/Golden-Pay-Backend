@@ -221,6 +221,16 @@ export function dropReason(reasons: string | null, drop: string): string | null 
   return kept.length ? kept.join("، ") : null;
 }
 
+/** The companies and banks an administrator chose (?clients=a,b); null shows all. */
+function chosenClients(params: URLSearchParams): string[] | null {
+  const ids = (params.get("clients") ?? "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean)
+    .slice(0, 100);
+  return ids.length ? ids : null;
+}
+
 /** What still stops a case from going out, in Arabic (empty: it can go). */
 async function blockers(item: Row): Promise<string[]> {
   const f = item.fields as Row;
@@ -258,13 +268,16 @@ async function assertClientForm(templateId: string, clientId: string): Promise<v
 export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
   router.get(
     "/investigations/intake/overview",
-    withPermission(MANAGE, async () => {
+    withPermission(MANAGE, async (context) => {
       const configured = configuredInboxes().map((inbox) => inbox.name);
-      const [states, counts, unknown, today] = await Promise.all([
+      const clients = chosenClients(context.url.searchParams);
+      const [states, counts, unknown, today, linked] = await Promise.all([
         query("SELECT inbox, last_poll_at, last_ok_at, last_error FROM mail_inbox_state ORDER BY inbox"),
         query(
           `SELECT status, count(*)::int AS count, min(release_at) AS next_release FROM mail_cases
-           WHERE status IN ('review','ready','failed','sending') GROUP BY status`,
+           WHERE status IN ('review','ready','failed','sending') AND ($1::text[] IS NULL OR client_id = ANY($1))
+           GROUP BY status`,
+          [clients],
         ),
         query(
           `SELECT from_domain AS domain, count(*)::int AS count, max(received_at) AS last_at,
@@ -276,16 +289,29 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
           `SELECT count(*)::int AS received,
              count(*) FILTER (WHERE status IN ('cases','review'))::int AS requests,
              count(*) FILTER (WHERE ai_used)::int AS ai_read
-           FROM mail_messages WHERE received_at >= date_trunc('day', now() AT TIME ZONE 'Africa/Cairo') AT TIME ZONE 'Africa/Cairo'`,
+           FROM mail_messages WHERE received_at >= date_trunc('day', now() AT TIME ZONE 'Africa/Cairo') AT TIME ZONE 'Africa/Cairo'
+             AND ($1::text[] IS NULL OR client_id = ANY($1))`,
+          [clients],
+        ),
+        // The filter's list: every linked company and bank, with what waits for review there.
+        query(
+          `SELECT p.client_id, c.name, c.client_type,
+             (SELECT count(*)::int FROM mail_cases x WHERE x.client_id = p.client_id) AS total,
+             (SELECT count(*)::int FROM mail_cases x WHERE x.client_id = p.client_id AND x.status IN ('review','failed')) AS to_review
+           FROM mail_client_profiles p JOIN form_clients c ON c.client_id = p.client_id ORDER BY c.name`,
         ),
       ]);
       const sentToday = await query(
         `SELECT count(*)::int AS count FROM mail_cases WHERE status='sent'
-           AND updated_at >= date_trunc('day', now() AT TIME ZONE 'Africa/Cairo') AT TIME ZONE 'Africa/Cairo'`,
+           AND updated_at >= date_trunc('day', now() AT TIME ZONE 'Africa/Cairo') AT TIME ZONE 'Africa/Cairo'
+           AND ($1::text[] IS NULL OR client_id = ANY($1))`,
+        [clients],
       );
       const [attention] = await query(
         `SELECT count(*)::int AS count FROM mail_messages m
-         WHERE m.status IN ('review','failed') AND NOT EXISTS (SELECT 1 FROM mail_cases n WHERE n.message_id = m.message_id)`,
+         WHERE m.status IN ('review','failed') AND NOT EXISTS (SELECT 1 FROM mail_cases n WHERE n.message_id = m.message_id)
+           AND ($1::text[] IS NULL OR m.client_id = ANY($1))`,
+        [clients],
       );
       return ok({
         attention: attention?.count ?? 0,
@@ -299,6 +325,7 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
         cases: Object.fromEntries(counts.map((c) => [c.status, { count: c.count, next_release: c.next_release }])),
         today: { ...(today[0] ?? {}), sent: sentToday[0]?.count ?? 0 },
         unknown_domains: unknown,
+        clients: linked,
         rule: "من 8 صباحًا إلى 4 مساءً تُرسل فورًا، ومن 4 مساءً إلى 8 صباحًا تُجدول للساعة 8 صباحًا",
       });
     }),
@@ -352,8 +379,9 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
              OR ($1 = 'attention' AND m.status IN ('review','failed')
                  AND NOT EXISTS (SELECT 1 FROM mail_cases n WHERE n.message_id = m.message_id)))
            AND ($2::text IS NULL OR m.subject ILIKE '%' || $2 || '%' OR m.from_address ILIKE '%' || $2 || '%')
+           AND ($3::text[] IS NULL OR m.client_id = ANY($3))
          ORDER BY m.received_at DESC LIMIT 200`,
-        [status || null, search || null],
+        [status || null, search || null, chosenClients(params)],
       );
       return ok({ messages: rows });
     }),
@@ -469,8 +497,9 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
          FROM mail_cases x JOIN mail_messages m ON m.message_id = x.message_id
          LEFT JOIN form_clients c ON c.client_id = x.client_id
          LEFT JOIN investigations i ON i.investigation_id = x.investigation_id
-         WHERE x.status = ANY($1::text[]) ORDER BY COALESCE(x.release_at, x.created_at) LIMIT 300`,
-        [status.split(",")],
+         WHERE x.status = ANY($1::text[]) AND ($2::text[] IS NULL OR x.client_id = ANY($2))
+         ORDER BY COALESCE(x.release_at, x.created_at) LIMIT 300`,
+        [status.split(","), chosenClients(context.url.searchParams)],
       );
       return ok({ cases: rows });
     }),
