@@ -605,9 +605,12 @@ export async function listExcuses(limit = 100) {
   );
 }
 
-/** When the investigator must have sent the report: from accepting, or from the appointment. */
+/**
+ * When the investigator must have sent the report: from accepting, or from the appointment
+ * (a scheduled type, or a time agreed with the customer on a normal or fast case).
+ */
 const DEADLINE_SQL = (minutes: string) =>
-  `(GREATEST(i.claimed_at, CASE WHEN l.delivery_hours IS NULL THEN i.due_at ELSE i.claimed_at END)
+  `(GREATEST(i.claimed_at, COALESCE(i.appointment_at, CASE WHEN l.delivery_hours IS NULL THEN i.due_at ELSE i.claimed_at END))
      + make_interval(mins => ${minutes}))`;
 
 /**

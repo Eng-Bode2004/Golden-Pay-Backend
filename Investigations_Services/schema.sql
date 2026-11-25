@@ -441,3 +441,11 @@ CREATE TABLE IF NOT EXISTS mail_sent (
   sent_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_mail_sent_case ON mail_sent (investigation_id, sent_at DESC);
+
+-- Whether the customer knows of the visit (with | without), as the client wrote it. «with»:
+-- an administrator calls the customer and sets the appointment before the case goes out.
+ALTER TABLE mail_cases ADD COLUMN IF NOT EXISTS knowledge text;
+ALTER TABLE mail_cases ADD COLUMN IF NOT EXISTS appointment_at timestamptz;
+ALTER TABLE investigations ADD COLUMN IF NOT EXISTS customer_knowledge text;
+-- A visit at an agreed time: the deadline counts from it, whatever the case's type and price.
+ALTER TABLE investigations ADD COLUMN IF NOT EXISTS appointment_at timestamptz;

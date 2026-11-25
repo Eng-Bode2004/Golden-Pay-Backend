@@ -177,9 +177,16 @@ function fromHeaderRow(rows: string[][]): ExtractedCase[] | null {
 function fromLabelColumn(rows: string[][]): ExtractedCase[] | null {
   const item = emptyCase();
   let found = 0;
+  // A merchant form («استعلام تجار») names the business, not a person: «اسم التاجر».
+  let merchant: string | null = null;
   for (const row of rows) {
     const cells = row.map((cell) => cell.trim());
     for (let i = 0; i < cells.length; i += 1) {
+      if (!merchant && cells[i] && MERCHANT_NAME.test(normalizeText(cells[i]!))) {
+        merchant = clean(cells.find((cell, j) => j !== i && cell && !(cell.length <= 30 && fieldOfHeader(cell)))) ?? null;
+        if (merchant) found += 1;
+        break;
+      }
       const field = cells[i] && cells[i]!.length <= 30 ? fieldOfHeader(cells[i]!) : null;
       if (!field) continue;
       // The value is the other filled cell on the row (an address may itself contain «الحي»).
@@ -191,8 +198,15 @@ function fromLabelColumn(rows: string[][]): ExtractedCase[] | null {
       break;
     }
   }
+  if (merchant) {
+    item.company ??= merchant;
+    item.subject_name ??= merchant;
+    item.kind ??= "business";
+  }
   return found >= 3 && item.subject_name ? [finish(item, [])] : null;
 }
+
+const MERCHANT_NAME = /^اسم (ال)?(تاجر|محل|معرض)$/;
 
 /** Cases from one grid (an Excel sheet or an HTML table). */
 export function casesFromGrid(rows: string[][]): ExtractedCase[] {

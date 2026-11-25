@@ -387,6 +387,7 @@ export async function insertCase(
   const scheduledRaw = optionalText(body.scheduled_at, 40);
   const scheduled = scheduledRaw ? new Date(scheduledRaw) : null;
   if (scheduled && Number.isNaN(scheduled.getTime())) throw ApiError.badRequest("scheduled_at must be a date");
+  const knowledge = body.customer_knowledge === "with" || body.customer_knowledge === "without" ? body.customer_knowledge : null;
   if (level.delivery_hours === null && !scheduled) {
     throw ApiError.badRequest("Choose the appointment for a scheduled investigation", { field: "scheduled_at" });
   }
@@ -458,12 +459,12 @@ export async function insertCase(
         await query("INSERT INTO investigation_recipients(investigation_id,user_id) VALUES($1,$2)", [id, user]);
       }
     }
-    await query("UPDATE investigations SET price_rule_id = $2, source = $3, mail_case_id = $4 WHERE investigation_id = $1", [
-      id,
-      quote.rule_id,
-      extra.source ?? "manual",
-      extra.mailCaseId ?? null,
-    ]);
+    // An appointment on any type (a scheduled one, or one agreed with the customer) sets the deadline.
+    await query(
+      `UPDATE investigations SET price_rule_id = $2, source = $3, mail_case_id = $4, appointment_at = $5, customer_knowledge = $6
+       WHERE investigation_id = $1`,
+      [id, quote.rule_id, extra.source ?? "manual", extra.mailCaseId ?? null, scheduled, knowledge],
+    );
     await logEvent(id, "created", null, actorId);
   });
   await offerNext(id);

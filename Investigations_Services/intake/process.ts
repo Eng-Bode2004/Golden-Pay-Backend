@@ -10,7 +10,9 @@ import {
   cleanText,
   DEFAULT_FAST_WORDS,
   DEFAULT_IGNORE_WORDS,
+  APPOINTMENT_NEEDED,
   detectFast,
+  detectKnowledge,
   domainMatches,
   findNationalId,
   freshBody,
@@ -180,6 +182,8 @@ async function read(message: Row): Promise<ProcessOutcome> {
   }
 
   const emailKind = requestKind(subject, plain);
+  const emailKnowledge = detectKnowledge(`${subject}
+${bodyText}`);
   const emailFast = detectFast(`${subject}\n${bodyText}`, profile.fast_words.length ? profile.fast_words : DEFAULT_FAST_WORDS);
   const attachments = ((message.attachments as Attachment[]) ?? []).filter((file) => !isDecoration(file));
   if (replied && !attachments.some((file) => isXlsx(file) || isCsv(file) || isPdf(file) || /\.docx?$/i.test(file.name))) {
@@ -318,12 +322,14 @@ async function read(message: Row): Promise<ProcessOutcome> {
       if (!fields.governorate) reasons.push("المحافظة غير معروفة");
       if (!kind) reasons.push("نوع الاستعلام غير محدد");
       else if (!profile.templates[kind]) reasons.push(`لا يوجد نموذج «${KIND_LABELS[kind]}» لهذه الجهة`);
+      // The customer expects the visit: an administrator calls them and sets the time first.
+      if (emailKnowledge === "with") reasons.push(APPOINTMENT_NEEDED);
 
       const unique = [...new Set(reasons.map(cleanText))];
       const status = unique.length ? "review" : "ready";
       await query(
-        `INSERT INTO mail_cases(message_id, client_id, kind, fast, fields, confidence, doubts, source, status, reason, release_at)
-         VALUES($1,$2,$3,$4,$5::text::jsonb,$6,$7,$8,$9,$10,$11)`,
+        `INSERT INTO mail_cases(message_id, client_id, kind, fast, fields, confidence, doubts, source, status, reason, release_at, knowledge)
+         VALUES($1,$2,$3,$4,$5::text::jsonb,$6,$7,$8,$9,$10,$11,$12)`,
         [
           message.message_id,
           profile.client_id,
@@ -336,6 +342,7 @@ async function read(message: Row): Promise<ProcessOutcome> {
           status,
           unique.join("، ") || null,
           releaseAt,
+          emailKnowledge,
         ],
       );
       if (status === "ready") ready += 1;

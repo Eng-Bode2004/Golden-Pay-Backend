@@ -9,7 +9,7 @@ export const KIND_LABELS: Record<CaseKind, string> = {
   home: "سكن",
   work: "عمل",
   home_work: "سكن وعمل",
-  business: "ميداني / منشأة",
+  business: "ميداني / منشأة / تجار",
   finishing: "تشطيب وحدة",
 };
 
@@ -119,12 +119,39 @@ export function detectKind(text: string): CaseKind | null {
   const word = (pattern: string) => new RegExp(`(^|[^\\p{L}])(${pattern})($|[^\\p{L}])`, "u").test(t);
   if (word("(ال)?تشطيب")) return "finishing";
   if (/سكن\s*و\s*(ال)?عمل|home\s*(and|&)\s*work|work\s*(and|&)\s*home/.test(t)) return "home_work";
-  if (word("(ال)?ميداني|(ال)?ميدانيه|(ال)?منشاه|(ال)?مصنع|موردين|field visit|زياره (المقر|جميع المقرات)")) return "business";
+  // «استعلام تجار» (Mogo's merchant visit); «تجاري» in «السجل التجاري» is another word.
+  if (word("(ال)?ميداني|(ال)?ميدانيه|(ال)?منشاه|(ال)?مصنع|موردين|(ال)?تجار|تاجر|merchants?|field visit|زياره (المقر|جميع المقرات)")) {
+    return "business";
+  }
   const home = word("(ال)?سكن|(ال)?منزل|محل الاقامه|home|residence");
   const work = word("(ال)?عمل|work");
   if (home && work) return "home_work";
   if (home) return "home";
   if (work) return "work";
+  return null;
+}
+
+export type CustomerKnowledge = "with" | "without";
+
+export const KNOWLEDGE_LABELS: Record<CustomerKnowledge, string> = {
+  with: "بعلم العميل",
+  without: "بدون علم العميل",
+};
+
+/** Why a «with knowledge» case waits: the appointment comes from a call to the customer. */
+export const APPOINTMENT_NEEDED = "بعلم العميل: اتصل بالعميل وحدد موعد الزيارة";
+
+/**
+ * Whether the customer knows of the visit, from the client's words. «بعلم العميل» means
+ * someone calls the customer first to set the appointment. Null when the email says nothing.
+ */
+export function detectKnowledge(text: string): CustomerKnowledge | null {
+  const t = normalizeText(text);
+  const customer = "(ال)?(عميل|عميله|عملاء|مستعلم عنه|مستعلم عنها)";
+  if (new RegExp(`(بدون|دون|من غير|بغير|عدم) (علم|معرفه) ${customer}|without (the )?(customer|client)('s)? knowledge`, "u").test(t)) {
+    return "without";
+  }
+  if (new RegExp(`(ب|مع )(علم|معرفه) ${customer}|with (the )?(customer|client)('s)? knowledge`, "u").test(t)) return "with";
   return null;
 }
 

@@ -3,6 +3,7 @@ import {
   cairoInstant,
   detectFast,
   detectKind,
+  detectKnowledge,
   domainMatches,
   findNationalId,
   freshBody,
@@ -203,5 +204,43 @@ describe("what must never go out automatically", () => {
   test("active content from an email is never shown", () => {
     for (const type of ["text/html", "image/svg+xml", "application/xhtml+xml", "text/xml", ""]) expect(safeInlineType(type)).toBeNull();
     expect(safeInlineType("application/pdf")).toBe("application/pdf");
+  });
+});
+
+describe("customer knowledge and merchant visits", () => {
+  test("with or without the customer's knowledge, as the client writes it", () => {
+    expect(detectKnowledge("استعلام سكن فقط بعلم العميل")).toBe("with");
+    expect(detectKnowledge("استعلام عمل - بعلم العميلة")).toBe("with");
+    expect(detectKnowledge("مع علم العميل")).toBe("with");
+    expect(detectKnowledge("استعلام سكن وعمل بدون علم العميل")).toBe("without");
+    expect(detectKnowledge("دون علم العميل")).toBe("without");
+    expect(detectKnowledge("من غير علم العميل")).toBe("without");
+    expect(detectKnowledge("Home visit without customer knowledge")).toBe("without");
+    expect(detectKnowledge("استعلام سكن فقط")).toBeNull();
+    // «علم» alone, or about someone else, says nothing about the customer.
+    expect(detectKnowledge("للعلم تم ارسال الطلب")).toBeNull();
+  });
+
+  test("«استعلام تجار» is a merchant visit; the commercial register is not", () => {
+    expect(detectKind("استعلام تجار")).toBe("business");
+    expect(detectKind("ex merchant")).toBe("business");
+    expect(detectKind("مرفق السجل التجاري والبطاقة الضريبية")).toBeNull();
+  });
+});
+
+describe("Mogo merchant sheet («استعلام تجار»)", () => {
+  test("a label/value sheet that names the merchant is one business visit", () => {
+    const rows = [
+      ["اسم التاجر", "معرض النور للسيارات"],
+      ["اسم الشخص المسؤول", "سامي فؤاد"],
+      ["طبيعة النشاط", "تجارة سيارات"],
+      ["العنوان بالتفصيل", "15 شارع التحرير، الدقي، الجيزة"],
+      ["رقم التليفون", "01001234567"],
+    ];
+    const [item] = casesFromGrid(rows);
+    expect(item?.subject_name).toBe("معرض النور للسيارات");
+    expect(item?.kind).toBe("business");
+    expect(item?.home_address).toContain("شارع التحرير");
+    expect(item?.phone).toBe("01001234567");
   });
 });

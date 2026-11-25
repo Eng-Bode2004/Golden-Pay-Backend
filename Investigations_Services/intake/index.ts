@@ -11,7 +11,17 @@ import { runSystemCheck } from "./check.ts";
 import { configuredInboxes, pollAll, refetchMessage, sendFromInbox } from "./inbox.ts";
 import { loadProfiles, processMessage } from "./process.ts";
 import { setupClients } from "./setup.ts";
-import { domainMatches, findNationalId, KIND_LABELS, safeInlineType, sendTime, type CaseKind } from "./rules.ts";
+import {
+  APPOINTMENT_NEEDED,
+  domainMatches,
+  findNationalId,
+  KIND_LABELS,
+  KNOWLEDGE_LABELS,
+  safeInlineType,
+  sendTime,
+  type CaseKind,
+  type CustomerKnowledge,
+} from "./rules.ts";
 
 type Row = Record<string, unknown>;
 const MANAGE = PERMISSIONS.INVESTIGATIONS_MANAGE;
@@ -30,6 +40,9 @@ export interface IntakeDeps {
 }
 
 // ───────────── sending cases out ─────────────
+
+const cairoTime = (at: Date) =>
+  at.toLocaleString("ar-EG", { timeZone: "Africa/Cairo", dateStyle: "full", timeStyle: "short" });
 
 /**
  * Creates the investigation for one ready case and offers it to the area's investigators.
@@ -62,7 +75,11 @@ async function release(caseId: string, deps: IntakeDeps): Promise<{ ok: boolean;
     const [message] = await query("SELECT inbox, from_address, subject, received_at FROM mail_messages WHERE message_id=$1", [
       item.message_id,
     ]);
+    const knowledge = (item.knowledge as CustomerKnowledge | null) ?? null;
+    const appointment = item.appointment_at ? new Date(item.appointment_at as string) : null;
     const notes = [
+      knowledge ? KNOWLEDGE_LABELS[knowledge] : null,
+      appointment ? `موعد الزيارة المتفق عليه مع العميل: ${cairoTime(appointment)}` : null,
       f.national_id ? `الرقم القومي: ${f.national_id}` : null,
       f.notes as string | null,
       `وارد بالبريد (${message?.inbox ?? ""}) من ${message?.from_address ?? ""}: ${message?.subject ?? ""}`,
@@ -90,7 +107,10 @@ async function release(caseId: string, deps: IntakeDeps): Promise<{ ok: boolean;
             governorate: f.governorate,
             district: f.district,
             admin_notes: notes.slice(0, 2000),
+            // The client's normal or fast price; an agreed appointment only moves the deadline.
             service_level: item.fast ? profile.fast_level : profile.normal_level,
+            scheduled_at: appointment?.toISOString() ?? null,
+            customer_knowledge: knowledge,
           },
           template,
           (item.reviewed_by as string | null) ?? "system",
@@ -185,6 +205,22 @@ function cleanFields(input: unknown, current: Row): Row {
   return out;
 }
 
+/** An appointment typed by an administrator: a real time, from now to 60 days ahead. */
+function appointmentOf(value: unknown): Date | null {
+  if (value === null || value === "") return null;
+  const at = new Date(String(value));
+  if (Number.isNaN(at.getTime())) throw ApiError.badRequest("موعد غير صحيح", { field: "appointment_at" });
+  if (at.getTime() < Date.now() - 5 * 60_000) throw ApiError.badRequest("الموعد في الماضي", { field: "appointment_at" });
+  if (at.getTime() > Date.now() + 60 * 86_400_000) throw ApiError.badRequest("الموعد بعد أكثر من 60 يومًا", { field: "appointment_at" });
+  return at;
+}
+
+/** A reason list («، »-joined) without one of its reasons. */
+export function dropReason(reasons: string | null, drop: string): string | null {
+  const kept = (reasons ?? "").split("، ").filter((reason) => reason && reason !== drop);
+  return kept.length ? kept.join("، ") : null;
+}
+
 /** What still stops a case from going out, in Arabic (empty: it can go). */
 async function blockers(item: Row): Promise<string[]> {
   const f = item.fields as Row;
@@ -192,6 +228,7 @@ async function blockers(item: Row): Promise<string[]> {
   if (!f.subject_name) out.push("لا يوجد اسم");
   if (!f.address) out.push("لا يوجد عنوان");
   if (!f.governorate) out.push("المحافظة غير معروفة");
+  if (item.knowledge === "with" && !item.appointment_at) out.push("حدد موعد الزيارة بعد الاتصال بالعميل");
   const profile = (await loadProfiles()).find((p) => p.client_id === item.client_id);
   if (!profile) out.push("الجهة غير مضبوطة");
   else if (item.template_id) return out;
@@ -427,7 +464,7 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
       const status = context.url.searchParams.get("status") || "review";
       const rows = await query(
         `SELECT x.case_id, x.message_id, x.kind, x.fast, x.fields, x.confidence, x.doubts, x.source, x.status, x.reason,
-           x.release_at, x.investigation_id, x.updated_at, x.template_id, x.assignee_id, c.name AS client_name, m.subject, m.from_address, m.inbox,
+           x.release_at, x.investigation_id, x.updated_at, x.template_id, x.assignee_id, x.knowledge, x.appointment_at, c.name AS client_name, m.subject, m.from_address, m.inbox,
            m.received_at, i.reference
          FROM mail_cases x JOIN mail_messages m ON m.message_id = x.message_id
          LEFT JOIN form_clients c ON c.client_id = x.client_id
@@ -454,8 +491,17 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
       const templateId = body.template_id === undefined ? item.template_id : optionalText(body.template_id, 64);
       if (templateId) await assertClientForm(templateId as string, item.client_id as string);
       const assigneeId = body.assignee_id === undefined ? item.assignee_id : optionalText(body.assignee_id, 64);
+      const knowledge = body.knowledge === undefined ? item.knowledge : body.knowledge;
+      if (knowledge !== null && knowledge !== "with" && knowledge !== "without") {
+        throw ApiError.badRequest("knowledge must be with, without or null", { field: "knowledge" });
+      }
+      const appointment = body.appointment_at === undefined ? item.appointment_at : appointmentOf(body.appointment_at);
+      // Set after the call: the case no longer waits for it.
+      const reason =
+        knowledge === "with" && !appointment ? item.reason : dropReason(item.reason as string | null, APPOINTMENT_NEEDED);
       const rows = await query(
-        `UPDATE mail_cases SET fields=$2::text::jsonb, kind=$3, fast=$4, template_id=$5, assignee_id=$6, updated_at=now()
+        `UPDATE mail_cases SET fields=$2::text::jsonb, kind=$3, fast=$4, template_id=$5, assignee_id=$6, knowledge=$7,
+           appointment_at=$8, reason=$9, updated_at=now()
          WHERE case_id=$1 AND status IN ('review','failed','ready') RETURNING *`,
         [
           context.params.case_id,
@@ -464,6 +510,9 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
           typeof body.fast === "boolean" ? body.fast : item.fast,
           templateId ?? null,
           assigneeId ?? null,
+          knowledge,
+          knowledge === "with" ? (appointment ?? null) : null,
+          reason,
         ],
       );
       if (!rows.length) throw new ApiError(409, "INVALID_STATUS_TRANSITION", "This case has already been sent");
@@ -485,7 +534,9 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
       // «Send now» skips the night rule. Otherwise the time rules, and never at night by accident.
       const [message] = await query("SELECT received_at FROM mail_messages WHERE message_id=$1", [item.message_id]);
       const now = new Date();
-      const at = body.send_now === true ? now : sendTime(new Date(message?.received_at as string), now);
+      let at = body.send_now === true ? now : sendTime(new Date(message?.received_at as string), now);
+      // An agreed visit is offered in time for it, even when the night rule would wait.
+      if (item.appointment_at && new Date(item.appointment_at as string) <= at) at = now;
       const approved = await query(
         `UPDATE mail_cases SET status='ready', release_at=$2, reason=NULL, reviewed_by=$3, reviewed_at=now(), updated_at=now()
          WHERE case_id=$1 AND status IN ('review','failed','ready') RETURNING case_id`,
