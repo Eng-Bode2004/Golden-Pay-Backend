@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  areaTargets,
   cairoInstant,
   detectFast,
   detectKind,
@@ -280,5 +281,21 @@ describe("the form for a kind", () => {
     expect(formFor(templates, "supplier")).toEqual({ templateId: "s", fallback: true });
     expect(formFor(templates, "work")).toBeNull();
     expect(formFor({ home: "h" }, "supplier")).toBeNull();
+  });
+});
+
+describe("where an emailed case is offered", () => {
+  test("the most exact place first, then each wider one", () => {
+    const targets = areaTargets({ governorate: "المنوفية", district: "شبين الكوم", local_unit: "البتانون", main_village: "" });
+    expect(targets.map((t) => t.area)).toEqual([
+      { mode: "hierarchy", governorate: "المنوفية", district: "شبين الكوم", local_unit: "البتانون" },
+      { mode: "hierarchy", governorate: "المنوفية", district: "شبين الكوم" },
+      { mode: "hierarchy", governorate: "المنوفية" },
+    ]);
+  });
+
+  test("governorate only, or nothing", () => {
+    expect(areaTargets({ governorate: "القاهرة" }).map((t) => t.area)).toEqual([{ mode: "hierarchy", governorate: "القاهرة" }]);
+    expect(areaTargets({ district: "مدينة نصر" })).toEqual([]);
   });
 });

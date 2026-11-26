@@ -109,6 +109,8 @@ Each case is one person (or one business) to visit. Fill the fields exactly as w
 - confidence: 0 to 1, how sure you are of the name, the ID and the address together.
 - doubts: in Arabic, each field you could not read clearly or had to guess (for handwriting, list every unclear word's field). Empty when everything is clear.
 
+Scanned pages and photos are often rotated sideways or upside down: turn them in your head and read them in whatever orientation makes the text upright before deciding they are unreadable. Look for the address on every page (application forms, ID copies, commercial register, tax card, letterheads and stamps). Never use Golden Pay's or the bank's own address.
+
 Handwritten application photos: read every line carefully; national IDs in Arabic-Indic digits become ASCII digits. If a digit is unclear, still give your best reading and add a doubt.
 
 Addresses: home_address is only where the person lives and work_address only where they work. For a work or business request put the place to visit in work_address. Never copy one into the other. governorate and district describe the home address when both are given.

@@ -13,6 +13,8 @@ import { loadProfiles, placeOfAddress, processMessage } from "./process.ts";
 import { setupClients } from "./setup.ts";
 import {
   APPOINTMENT_NEEDED,
+  areaTargets,
+  PLACE_LEVELS,
   domainMatches,
   formFor,
   findNationalId,
@@ -90,10 +92,8 @@ async function release(caseId: string, deps: IntakeDeps): Promise<{ ok: boolean;
     // Sent to a chosen investigator, or to everyone in the area.
     const targets: Row[] = item.assignee_id
       ? [{ target_mode: "person", assignee_id: item.assignee_id }]
-      : ([
-          f.district ? { target_mode: "area", area: { mode: "hierarchy", governorate: f.governorate, district: f.district } } : null,
-          { target_mode: "area", area: { mode: "hierarchy", governorate: f.governorate } },
-        ].filter(Boolean) as Row[]);
+      : areaTargets(f);
+    if (!targets.length) throw new Error("المحافظة غير معروفة: اختر المنطقة");
     let created: { investigation_id: string; reference: string } | null = null;
     let lastError: unknown = null;
     for (const target of targets) {
@@ -107,6 +107,9 @@ async function release(caseId: string, deps: IntakeDeps): Promise<{ ok: boolean;
             address: f.address,
             governorate: f.governorate,
             district: f.district,
+            local_unit: f.local_unit ?? null,
+            main_village: f.main_village ?? null,
+            sub_village: f.sub_village ?? null,
             admin_notes: notes.slice(0, 2000),
             // The client's normal or fast price; an agreed appointment only moves the deadline.
             service_level: item.fast ? profile.fast_level : profile.normal_level,
@@ -125,7 +128,7 @@ async function release(caseId: string, deps: IntakeDeps): Promise<{ ok: boolean;
       }
     }
     if (!created) {
-      const where = [f.governorate, f.district].filter(Boolean).join(" - ");
+      const where = PLACE_LEVELS.map((level) => f[level]).filter(Boolean).join(" - ");
       throw lastError instanceof ApiError && lastError.code === "NO_INVESTIGATORS_IN_AREA"
         ? new Error(`لا يوجد مستعلم يعمل لهذه الجهة في ${where}`)
         : lastError;
@@ -195,7 +198,10 @@ export function startIntake(deps: IntakeDeps): void {
 
 // ───────────── routes ─────────────
 
-const CASE_FIELDS = ["subject_name", "national_id", "phone", "address", "home_address", "work_address", "company", "governorate", "district", "client_reference", "notes"] as const;
+const CASE_FIELDS = [
+  "subject_name", "national_id", "phone", "address", "home_address", "work_address", "company",
+  "governorate", "district", "local_unit", "main_village", "sub_village", "client_reference", "notes",
+] as const;
 
 function cleanFields(input: unknown, current: Row): Row {
   const body = (input && typeof input === "object" ? input : {}) as Row;
@@ -518,6 +524,14 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
       const kind = body.kind === undefined ? item.kind : body.kind;
       if (kind !== null && !KINDS.includes(kind as CaseKind)) throw ApiError.badRequest("Unknown kind", { field: "kind" });
       const fields = cleanFields(body.fields, item.fields as Row);
+      // No governorate chosen: take it (and the district) from the address, as a new email does.
+      if (!fields.governorate && fields.address) {
+        const place = await placeOfAddress(fields.address as string);
+        if (place.governorate) {
+          fields.governorate = place.governorate;
+          fields.district ??= place.district;
+        }
+      }
       const templateId = body.template_id === undefined ? item.template_id : optionalText(body.template_id, 64);
       if (templateId) await assertClientForm(templateId as string, item.client_id as string);
       const assigneeId = body.assignee_id === undefined ? item.assignee_id : optionalText(body.assignee_id, 64);

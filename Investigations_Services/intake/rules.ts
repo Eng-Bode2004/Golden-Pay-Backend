@@ -365,6 +365,26 @@ export function kindOfRow(row: {
  * (each bank form is one visit), so it becomes one case for each. Both are made even when
  * one of the two forms is missing: that case then waits and says so, and neither visit is lost.
  */
+/** The five place levels of an address, from the governorate down. */
+export const PLACE_LEVELS = ["governorate", "district", "local_unit", "main_village", "sub_village"] as const;
+
+/**
+ * Where an emailed case is offered: the most exact place the admin or the reading gave first,
+ * then each wider one up to the governorate, so a village nobody covers still reaches the district.
+ */
+export function areaTargets(fields: Record<string, unknown>): Record<string, unknown>[] {
+  if (!fields.governorate) return [];
+  let depth = 0;
+  while (depth + 1 < PLACE_LEVELS.length && fields[PLACE_LEVELS[depth + 1]!]) depth++;
+  const out: Record<string, unknown>[] = [];
+  for (let level = depth; level >= 0; level--) {
+    const area: Record<string, unknown> = { mode: "hierarchy" };
+    for (const name of PLACE_LEVELS.slice(0, level + 1)) area[name] = fields[name];
+    out.push({ target_mode: "area", area });
+  }
+  return out;
+}
+
 export function visitsFor(kind: CaseKind | null, templates: Partial<Record<CaseKind, string>>): (CaseKind | null)[] {
   if (kind === "home_work" && !templates.home_work) return ["home", "work"];
   return [kind];
