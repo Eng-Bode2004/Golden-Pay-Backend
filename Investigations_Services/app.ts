@@ -700,6 +700,8 @@ router.get(
         ...(manager
           ? {
               ...(await timeline(row.investigation_id as string)),
+              // The bank's or company's own email and documents, for the reviewer (never the investigator).
+              source_email: await sourceEmail(row.mail_case_id as string | null),
               locations: await query(
                 `SELECT kind, lat, lng, accuracy, created_at FROM investigation_locations
                  WHERE investigation_id=$1 ORDER BY created_at`,
@@ -711,6 +713,24 @@ router.get(
     });
   }),
 );
+
+/** The email a case came from and its attachments (names and sizes; files are fetched one by one). */
+async function sourceEmail(mailCaseId: string | null) {
+  if (!mailCaseId) return null;
+  const [message] = await query(
+    `SELECT m.message_id, m.inbox, m.from_address, m.from_name, m.subject, m.body_text, m.received_at, m.attachments
+     FROM mail_cases c JOIN mail_messages m ON m.message_id = c.message_id WHERE c.case_id = $1`,
+    [mailCaseId],
+  ).catch(() => []);
+  if (!message) return null;
+  const files = ((message.attachments as Row[] | null) ?? []).map((file) => ({
+    index: file.index,
+    name: file.name,
+    type: file.type,
+    bytes: file.bytes,
+  }));
+  return { ...message, body_text: ((message.body_text as string | null) ?? "").slice(0, 20_000), attachments: files };
+}
 
 /** Offers, events and durations for the admin's case drawer. */
 async function timeline(id: string) {
