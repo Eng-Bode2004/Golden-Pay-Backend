@@ -10,7 +10,7 @@ const AUDIT_EVENTS = [
   "headoffice.settings.updated", "headoffice.points.given", "headoffice.points.revoked", "headoffice.salary.updated",
   "headoffice.payroll.adjusted", "headoffice.payroll.adjustment_removed", "headoffice.payroll.paid",
   "headoffice.payroll.payment_undone", "headoffice.expense.created", "headoffice.expense.removed", "headoffice.complaint.status", "headoffice.app_release.published", "headoffice.app_release.changed", "headoffice.app_release.removed",
-  "investigation.created", "investigation.claimed", "investigation.submitted", "investigation.approved",
+  "investigation.created", "investigation.edited", "investigation.claimed", "investigation.submitted", "investigation.approved",
   "investigation.returned", "investigation.cancelled", "pricing.updated", "form.updated",
   "template.file_uploaded", "template.version_drafted", "template.updated", "template.returned",
   "template.approved", "template.activated",

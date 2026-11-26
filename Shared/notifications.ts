@@ -15,6 +15,7 @@ export type NotificationKind =
   | "offer"
   | "offer_closed"
   | "assigned"
+  | "case_edited"
   | "taken_back"
   | "excused"
   | "returned"

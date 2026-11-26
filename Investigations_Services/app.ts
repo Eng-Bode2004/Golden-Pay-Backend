@@ -19,6 +19,7 @@ import { optionalNumber, optionalText, requiredText, startService } from "../Sha
 import { findServiceLevel, registerFinanceRoutes, seedServiceLevels } from "./finance.ts";
 import { quotePrice, registerPricingRoutes } from "./pricing.ts";
 import { registerFollowUpRoutes } from "./followup.ts";
+import { editCase } from "./edit.ts";
 import { registerIntakeRoutes, startIntake, type IntakeDeps } from "./intake/index.ts";
 import { matchInvestigators } from "../Investigators_Services/app.ts";
 import {
@@ -788,6 +789,48 @@ router.get(
       ? await query("SELECT user_id, full_name, employee_number FROM users WHERE user_id = ANY($1::text[])", [[...ids]])
       : [];
     return ok({ attempts, ledger, names: Object.fromEntries(names.map((user) => [user.user_id, user])), exclusion_labels: EXCLUSION_LABELS });
+  }),
+);
+
+/**
+ * The admin edits a sent case: details, area, type, form. `preview: true` only says what would
+ * change. Administrators without money rights never see the prices that change.
+ */
+router.patch(
+  "/investigations/:id/details",
+  withPermission(MANAGE, async (context, auth) => {
+    const body = await readJson(context.req);
+    const preview = body.preview === true;
+    const result = await editCase(
+      context.params.id ?? "",
+      body,
+      auth.user.user_id,
+      { activeTemplate, match: async (filter) => (await matchInvestigators(filter)).map((row) => row.user_id as string), definitionOf },
+      preview,
+    );
+    if (result.saved) {
+      await recordAudit({
+        event: "investigation.edited",
+        actorId: auth.user.user_id,
+        success: true,
+        context,
+        metadata: {
+          investigation_id: context.params.id,
+          reference: result.reference,
+          // Field names only: the values may hold the customer's details.
+          fields: result.changes.map((change) => change.field),
+          resent: result.resent,
+          dropped_answers: result.dropped_answers.length,
+        },
+      });
+      const [row] = await query("SELECT pdf_path, report_edited_at FROM investigations WHERE investigation_id=$1", [context.params.id]);
+      if (row?.pdf_path && !row.report_edited_at && result.changes.length) void buildReport(context.params.id ?? "");
+    }
+    const money = seesMoney(auth);
+    return ok({
+      ...result,
+      changes: money ? result.changes : result.changes.filter((change) => !/price/.test(change.field)),
+    });
   }),
 );
 
