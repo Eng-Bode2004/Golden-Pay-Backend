@@ -238,6 +238,64 @@ function chosenClients(params: URLSearchParams): string[] | null {
   return ids.length ? ids : null;
 }
 
+/**
+ * «سكن وعمل» for a client with no combined form is two visits (as a new email is read): this case
+ * becomes the home visit and a copy becomes the work visit, each at its own address.
+ * Null when nothing was split.
+ */
+async function splitHomeWork(item: Row, actorId: string): Promise<{ home: Row; work_case_id: string } | null> {
+  if (item.kind !== "home_work" || item.template_id) return null;
+  const profile = (await loadProfiles()).find((p) => p.client_id === item.client_id);
+  if (!profile || profile.templates.home_work) return null;
+  const f = item.fields as Row;
+  const homeAddress = (f.home_address as string | null) ?? (f.work_address ? null : ((f.address as string | null) ?? null));
+  const workAddress = (f.work_address as string | null) ?? null;
+  const at = async (address: string | null): Promise<Row> => {
+    // The same address keeps the place already chosen; another address is placed from its words.
+    if (address && address === f.address) return { ...f };
+    const place = address ? await placeOfAddress(address) : { governorate: null, district: null };
+    return { ...f, address, ...place, local_unit: null, main_village: null, sub_village: null };
+  };
+  const [home] = await query(
+    `UPDATE mail_cases SET kind='home', fields=$2::text::jsonb, updated_at=now()
+     WHERE case_id=$1 AND kind='home_work' AND status IN ('review','failed','ready') RETURNING *`,
+    [item.case_id, JSON.stringify(await at(homeAddress))],
+  );
+  if (!home) return null;
+  // Picked «سكن وعمل» again on a person who already has the work visit: no second copy.
+  const [existing] = await query(
+    `SELECT case_id FROM mail_cases WHERE message_id=$1 AND kind='work' AND status <> 'rejected'
+       AND fields->>'subject_name' IS NOT DISTINCT FROM $2 LIMIT 1`,
+    [item.message_id, f.subject_name ?? null],
+  );
+  if (existing) return { home, work_case_id: existing.case_id as string };
+  const [work] = await query(
+    `INSERT INTO mail_cases(message_id, client_id, kind, fast, fields, confidence, doubts, source, status, reason, release_at,
+       knowledge, appointment_at, reviewed_by)
+     VALUES($1,$2,'work',$3,$4::text::jsonb,$5,$6,'manual','review',$7,$8,$9,$10,$11) RETURNING case_id`,
+    [
+      item.message_id,
+      item.client_id,
+      item.fast,
+      JSON.stringify(await at(workAddress)),
+      item.confidence,
+      item.doubts ?? [],
+      workAddress ? "زيارة العمل من طلب «سكن وعمل»: راجعها واعتمدها" : "زيارة العمل من طلب «سكن وعمل»: اكتب عنوان العمل",
+      item.release_at,
+      item.knowledge ?? null,
+      item.appointment_at ?? null,
+      actorId,
+    ],
+  );
+  await recordAudit({
+    event: "mail.case_visit_added",
+    actorId,
+    success: true,
+    metadata: { mail_case: work?.case_id, copied_from: item.case_id, added_visit: "work", split_home_work: true },
+  });
+  return { home, work_case_id: work?.case_id as string };
+}
+
 /** What still stops a case from going out, in Arabic (empty: it can go). */
 async function blockers(item: Row): Promise<string[]> {
   const f = item.fields as Row;
@@ -514,7 +572,7 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
 
   router.patch(
     "/investigations/intake/cases/:case_id",
-    withPermission(MANAGE, async (context) => {
+    withPermission(MANAGE, async (context, auth) => {
       const body = await readJson(context.req);
       const [item] = await query("SELECT * FROM mail_cases WHERE case_id=$1", [context.params.case_id]);
       if (!item) throw ApiError.notFound("Case not found");
@@ -560,7 +618,9 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
         ],
       );
       if (!rows.length) throw new ApiError(409, "INVALID_STATUS_TRANSITION", "This case has already been sent");
-      return ok({ case: rows[0], blockers: await blockers(rows[0]!) });
+      const split = await splitHomeWork(rows[0]!, auth.user.user_id);
+      const saved = split?.home ?? rows[0]!;
+      return ok({ case: saved, blockers: await blockers(saved), split_work_case_id: split?.work_case_id ?? null });
     }),
   );
 
@@ -573,6 +633,9 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
       if (!["review", "failed", "ready"].includes(item.status as string)) {
         throw new ApiError(409, "INVALID_STATUS_TRANSITION", "This case is not waiting for review");
       }
+      // An old «سكن وعمل» case goes out as its home visit; the work visit waits beside it.
+      const split = await splitHomeWork(item, auth.user.user_id);
+      if (split) Object.assign(item, split.home);
       const missing = await blockers(item);
       if (missing.length) throw new ApiError(422, "CASE_INCOMPLETE", missing.join("، "));
       // «Send now» skips the night rule. Otherwise the time rules, and never at night by accident.
@@ -600,7 +663,7 @@ export function registerIntakeRoutes(router: Router, deps: IntakeDeps): void {
          LEFT JOIN investigations i ON i.investigation_id = x.investigation_id WHERE x.case_id=$1`,
         [context.params.case_id],
       );
-      return ok({ ...after, sent: result.ok && after?.status === "sent" });
+      return ok({ ...after, sent: result.ok && after?.status === "sent", split_work_case_id: split?.work_case_id ?? null });
     }),
   );
 
